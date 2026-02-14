@@ -1,0 +1,270 @@
+"""
+bot/detector.py — YOLO inference wrapper with optional two-stage pipeline.
+
+Loads the model once, runs inference on captured frames, and groups
+detections into dealer-hand vs. player-hand based on spatial zones.
+
+When pipeline mode is active, YOLO provides bounding boxes and a
+fine-tuned ResNet18 classifies each crop (97.8% test accuracy).
+"""
+
+import numpy as np
+from PIL import Image
+from ultralytics import YOLO
+import config.settings as cfg
+
+
+def _compute_iou(box_a, box_b):
+    """Standard IoU between two (x1, y1, x2, y2) bboxes."""
+    xa = max(box_a[0], box_b[0])
+    ya = max(box_a[1], box_b[1])
+    xb = min(box_a[2], box_b[2])
+    yb = min(box_a[3], box_b[3])
+
+    inter = max(0, xb - xa) * max(0, yb - ya)
+    if inter == 0:
+        return 0.0
+
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    return inter / (area_a + area_b - inter)
+
+
+class CardDetector:
+    """Thin wrapper around a YOLO model for card detection."""
+
+    def __init__(self, model_path: str = cfg.MODEL_PATH, pipeline: bool = cfg.PIPELINE_MODE):
+        self.pipeline = pipeline
+
+        print(f"[detector] Loading YOLO model from {model_path} ...")
+        self.model = YOLO(model_path)
+        self.class_names = self.model.names  # {0: '2c', 1: '2d', ...}
+        print(f"[detector] Loaded — {len(self.class_names)} classes")
+
+        if self.pipeline:
+            self._load_cnn()
+
+    def _load_cnn(self):
+        """Lazily import torch and load the fine-tuned ResNet18 classifier."""
+        import torch
+        import torch.nn as nn
+        from torchvision.models import resnet18
+        from torchvision import transforms
+
+        self._torch = torch
+
+        # Determine device
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        self._device = device
+
+        # Rebuild the exact architecture from resnet1.ipynb
+        num_classes = len(cfg.CNN_CLASS_NAMES)
+        model = resnet18(weights=None)
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        model.maxpool = nn.Identity()
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+
+        # Load trained weights
+        state_dict = torch.load(cfg.CNN_MODEL_PATH, map_location=device, weights_only=True)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        self._cnn = model
+
+        # ImageNet normalization (same as training)
+        self._cnn_transform = transforms.Compose([
+            transforms.Resize(cfg.CNN_INPUT_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ])
+
+        print(f"[detector] Pipeline mode: YOLO + ResNet18 on {device}")
+        print(f"[detector] CNN classes: {num_classes}, threshold: {cfg.CNN_CONFIDENCE_THRESHOLD}")
+
+    def detect(self, frame: np.ndarray) -> list[dict]:
+        """Dispatch to pipeline or single-stage YOLO detection."""
+        return self._detect_pipeline(frame) if self.pipeline else self._detect_yolo(frame)
+
+    def _detect_yolo(self, frame: np.ndarray) -> list[dict]:
+        """
+        Run single-stage YOLO inference on a BGR frame.
+
+        Returns a list of detection dicts:
+        [
+            {
+                "class_name": "Kh",
+                "confidence": 0.93,
+                "bbox": (x1, y1, x2, y2),      # pixel coords in frame
+                "center": (cx, cy),
+            },
+            ...
+        ]
+        """
+        results = self.model.predict(
+            frame,
+            conf=cfg.CONFIDENCE_THRESHOLD,
+            iou=cfg.IOU_THRESHOLD,
+            verbose=False,
+        )
+
+        detections = []
+        for r in results:
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                detections.append({
+                    "class_name": self.class_names[cls_id],
+                    "confidence": float(box.conf[0]),
+                    "bbox": (int(x1), int(y1), int(x2), int(y2)),
+                    "center": (cx, cy),
+                })
+
+        return detections
+
+    def _detect_pipeline(self, frame: np.ndarray) -> list[dict]:
+        """
+        Two-stage detection: YOLO for bounding boxes, ResNet18 for classification.
+
+        The frame is BGR (from OpenCV). We convert to RGB once for CNN cropping.
+        """
+        torch = self._torch
+
+        # Stage 1: YOLO bounding boxes (use low conf to catch more cards)
+        results = self.model.predict(
+            frame,
+            conf=cfg.CONFIDENCE_THRESHOLD,
+            iou=cfg.IOU_THRESHOLD,
+            verbose=False,
+        )
+
+        # Convert BGR → RGB once for all crops
+        rgb_frame = frame[:, :, ::-1]
+
+        detections = []
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+                # Skip degenerate boxes
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                # Stage 2: crop and classify with ResNet18
+                crop = rgb_frame[y1:y2, x1:x2]
+                pil_crop = Image.fromarray(crop)
+                tensor = self._cnn_transform(pil_crop).unsqueeze(0).to(self._device)
+
+                with torch.no_grad():
+                    logits = self._cnn(tensor)
+                    probs = torch.softmax(logits, dim=1)
+                    confidence, pred_idx = probs.max(dim=1)
+                    confidence = confidence.item()
+                    pred_idx = pred_idx.item()
+
+                if confidence < cfg.CNN_CONFIDENCE_THRESHOLD:
+                    continue
+
+                class_name = cfg.CNN_CLASS_NAMES[pred_idx]
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                detections.append({
+                    "class_name": class_name,
+                    "confidence": confidence,
+                    "bbox": (x1, y1, x2, y2),
+                    "center": (cx, cy),
+                })
+
+        return detections
+
+    def detect_with_masking(
+        self,
+        frame: np.ndarray,
+        max_passes: int = cfg.MAX_DETECTION_PASSES,
+        mask_padding: int = cfg.MASK_PADDING,
+        dedup_iou: float = cfg.DEDUP_IOU_THRESHOLD,
+    ) -> list[dict]:
+        """
+        Run YOLO iteratively, masking detected cards between passes to
+        find overlapping cards that NMS might suppress.
+
+        Each detection dict gets an extra ``pass_num`` key (1-based).
+        """
+        all_detections: list[dict] = []
+        current_frame = frame.copy()
+
+        for pass_idx in range(1, max_passes + 1):
+            raw = self.detect(current_frame)
+
+            # Tag with pass number
+            for det in raw:
+                det["pass_num"] = pass_idx
+
+            # Filter duplicates against already-collected detections
+            novel = []
+            for det in raw:
+                is_dup = any(
+                    _compute_iou(det["bbox"], prev["bbox"]) > dedup_iou
+                    for prev in all_detections
+                )
+                if not is_dup:
+                    novel.append(det)
+
+            if not novel:
+                break
+
+            all_detections.extend(novel)
+
+            # Mask novel detections with local mean color
+            h, w = current_frame.shape[:2]
+            for det in novel:
+                x1, y1, x2, y2 = det["bbox"]
+                px1 = max(0, x1 - mask_padding)
+                py1 = max(0, y1 - mask_padding)
+                px2 = min(w, x2 + mask_padding)
+                py2 = min(h, y2 + mask_padding)
+                region = current_frame[py1:py2, px1:px2]
+                if region.size > 0:
+                    mean_color = region.mean(axis=(0, 1)).astype(np.uint8)
+                    current_frame[py1:py2, px1:px2] = mean_color
+
+        return all_detections
+
+    def parse_hands(self, detections: list[dict]) -> dict:
+        """
+        Split detections into dealer vs. player hands using Y-coordinate zones.
+
+        Returns
+        -------
+        {
+            "dealer": ["Kh", "5c"],      # class names only
+            "player": ["7d", "9s"],
+            "unknown": [...],             # cards outside both zones
+            "all_detections": [...]       # full detection dicts
+        }
+        """
+        dealer, player, unknown = [], [], []
+
+        for det in detections:
+            cy = det["center"][1]
+            if cfg.DEALER_ZONE_Y[0] <= cy <= cfg.DEALER_ZONE_Y[1]:
+                dealer.append(det["class_name"])
+            elif cfg.PLAYER_ZONE_Y[0] <= cy <= cfg.PLAYER_ZONE_Y[1]:
+                player.append(det["class_name"])
+            else:
+                unknown.append(det["class_name"])
+
+        return {
+            "dealer": dealer,
+            "player": player,
+            "unknown": unknown,
+            "all_detections": detections,
+        }
