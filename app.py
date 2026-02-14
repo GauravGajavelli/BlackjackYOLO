@@ -76,16 +76,60 @@ def detect():
     detections = detector.detect_with_masking(frame)
     hands = detector.parse_hands(detections)
 
-    # Debug: save frame and log detections
+    # Debug: save frame, zone crops, and log detections grouped by zone
     if args.debug:
         ts = int(_time.time() * 1000)
+        h, w = frame.shape[:2]
+
+        # Save full frame
         debug_path = f"{DEBUG_DIR}/frame_{ts}.png"
         saved = cv2.imwrite(debug_path, frame)
-        print(f"[debug] {'Saved' if saved else 'FAILED to save'} {debug_path} | shape={frame.shape} | detections={len(detections)}", flush=True)
+        print(f"[debug] {'Saved' if saved else 'FAILED to save'} {debug_path} | {w}x{h} | {len(detections)} detections", flush=True)
+
+        # Group detections by zone and log
+        by_zone: dict[str, list] = {"dealer": [], "player": [], "unknown": []}
         for det in detections:
-            print(f"[debug]   {det['class_name']} conf={det['confidence']:.3f} bbox={det['bbox']}", flush=True)
+            z = det.get("zone", "unknown")
+            by_zone.setdefault(z, []).append(det)
+
+        for zone_name in ("dealer", "player", "unknown"):
+            zone_dets = by_zone.get(zone_name, [])
+            if zone_dets:
+                cards_str = ", ".join(
+                    f"{d['class_name']} {d['confidence']:.2f}" for d in zone_dets
+                )
+                print(f"[debug]   {zone_name.upper()} ({len(zone_dets)}): {cards_str}", flush=True)
+
         if not detections:
             print("[debug]   No detections — check saved image for card visibility", flush=True)
+
+        # Save zone tiles (the actual square crops fed to YOLO)
+        import config.settings as _cfg
+        tile_size = _cfg.ZONE_TILE_SIZE
+        overlap = _cfg.ZONE_TILE_OVERLAP
+        stride = tile_size - overlap
+        for zone_name, (y_top, y_bot) in [("dealer", _cfg.DEALER_ZONE_Y), ("player", _cfg.PLAYER_ZONE_Y)]:
+            zone_mid = (y_top + y_bot) // 2
+            crop_y1 = max(0, zone_mid - tile_size // 2)
+            crop_y2 = crop_y1 + tile_size
+            if crop_y2 > h:
+                crop_y2 = h
+                crop_y1 = max(0, crop_y2 - tile_size)
+
+            x_starts = []
+            x = 0
+            while x + tile_size <= w:
+                x_starts.append(x)
+                x += stride
+            if not x_starts or x_starts[-1] + tile_size < w:
+                x_starts.append(max(0, w - tile_size))
+
+            for i, x_start in enumerate(x_starts):
+                tile = frame[crop_y1:crop_y2, x_start:x_start + tile_size]
+                tile_path = f"{DEBUG_DIR}/frame_{ts}_{zone_name}_tile{i}.png"
+                th, tw = tile.shape[:2]
+                cv2.imwrite(tile_path, tile)
+                print(f"[debug] Saved {tile_path} ({tw}x{th})", flush=True)
 
     # Update Hi-Lo count with newly seen cards
     global prev_seen
@@ -119,13 +163,7 @@ def detect():
     det_response = []
     total_passes = 0
     for det in detections:
-        cy = det["center"][1]
-        if det["class_name"] in hands["dealer"]:
-            zone = "dealer"
-        elif det["class_name"] in hands["player"]:
-            zone = "player"
-        else:
-            zone = "unknown"
+        zone = det.get("zone", "unknown")
         pass_num = det.get("pass_num", 1)
         total_passes = max(total_passes, pass_num)
         det_response.append({

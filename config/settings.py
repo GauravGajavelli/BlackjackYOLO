@@ -6,7 +6,7 @@ config/settings.py — All tunable parameters in one place.
 # YOLO Model
 # ---------------------------------------------------------------------------
 MODEL_PATH = "models/best.pt"    # Path to your trained YOLO weights
-CONFIDENCE_THRESHOLD = 0.25      # Minimum detection confidence to accept
+CONFIDENCE_THRESHOLD = 0.45      # Minimum detection confidence to accept
 IOU_THRESHOLD = 0.40             # NMS IoU threshold
 
 # ---------------------------------------------------------------------------
@@ -46,3 +46,11 @@ CNN_MODEL_PATH = "models/cnn_resnet18_224x224.pt"
 CNN_INPUT_SIZE = (224, 224)
 CNN_CONFIDENCE_THRESHOLD = 0.30
 CNN_CLASS_NAMES = sorted(CLASS_NAMES)  # alphabetical — matches ImageFolder training order
+
+# ---------------------------------------------------------------------------
+# Detection Tuning
+# ---------------------------------------------------------------------------
+YOLO_IMGSZ = 640                # Inference resolution (higher = more detail for small cards)
+ZONE_DETECTION = True           # Crop dealer/player zones and detect separately
+ZONE_TILE_SIZE = 416            # Square tile side length (416 = model training imgsz)
+ZONE_TILE_OVERLAP = 100         # Horizontal overlap between tiles (>= card width ~80px)

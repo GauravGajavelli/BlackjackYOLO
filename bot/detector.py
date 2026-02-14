@@ -90,8 +90,87 @@ class CardDetector:
         print(f"[detector] CNN classes: {num_classes}, threshold: {cfg.CNN_CONFIDENCE_THRESHOLD}")
 
     def detect(self, frame: np.ndarray) -> list[dict]:
+        """Top-level dispatcher: zone-based or full-frame detection."""
+        if cfg.ZONE_DETECTION:
+            return self._detect_by_zone(frame)
+        return self._detect_single(frame)
+
+    def _detect_single(self, frame: np.ndarray) -> list[dict]:
         """Dispatch to pipeline or single-stage YOLO detection."""
         return self._detect_pipeline(frame) if self.pipeline else self._detect_yolo(frame)
+
+    def _detect_by_zone(self, frame: np.ndarray) -> list[dict]:
+        """
+        Tile each dealer/player zone into overlapping square crops for detection.
+
+        Square tiles (416x416) use the full YOLO 640x640 inference space with
+        minimal letterbox padding, giving ~2x more pixels per card compared to
+        the previous 820x180 rectangular strips.
+        """
+        tile_size = cfg.ZONE_TILE_SIZE
+        overlap = cfg.ZONE_TILE_OVERLAP
+        stride = tile_size - overlap
+        frame_h, frame_w = frame.shape[:2]
+
+        zones = [
+            ("dealer", cfg.DEALER_ZONE_Y),
+            ("player", cfg.PLAYER_ZONE_Y),
+        ]
+        all_detections = []
+
+        for zone_name, (y_top, y_bot) in zones:
+            # --- Vertical crop: center tile_size-tall band on zone midpoint ---
+            zone_mid = (y_top + y_bot) // 2
+            crop_y1 = max(0, zone_mid - tile_size // 2)
+            crop_y2 = crop_y1 + tile_size
+            if crop_y2 > frame_h:
+                crop_y2 = frame_h
+                crop_y1 = max(0, crop_y2 - tile_size)
+
+            # --- Horizontal tiles: slide across with stride ---
+            x_starts = []
+            x = 0
+            while x + tile_size <= frame_w:
+                x_starts.append(x)
+                x += stride
+            # Ensure the rightmost edge is covered
+            if not x_starts or x_starts[-1] + tile_size < frame_w:
+                x_starts.append(max(0, frame_w - tile_size))
+
+            # --- Detect per tile, remap, and filter ---
+            zone_detections = []
+            for x_start in x_starts:
+                tile = frame[crop_y1:crop_y2, x_start:x_start + tile_size]
+                if tile.size == 0:
+                    continue
+
+                dets = self._detect_single(tile)
+
+                for det in dets:
+                    # Remap tile-relative coords to full-frame coords
+                    x1, y1, x2, y2 = det["bbox"]
+                    det["bbox"] = (x1 + x_start, y1 + crop_y1, x2 + x_start, y2 + crop_y1)
+                    cx, cy = det["center"]
+                    det["center"] = (cx + x_start, cy + crop_y1)
+                    det["zone"] = zone_name
+
+                    # Filter: keep only detections whose center Y is inside the zone
+                    if y_top <= det["center"][1] <= y_bot:
+                        zone_detections.append(det)
+
+            # --- NMS dedup across overlapping tiles ---
+            zone_detections.sort(key=lambda d: d["confidence"], reverse=True)
+            kept = []
+            for det in zone_detections:
+                if not any(
+                    _compute_iou(det["bbox"], k["bbox"]) > cfg.DEDUP_IOU_THRESHOLD
+                    for k in kept
+                ):
+                    kept.append(det)
+
+            all_detections.extend(kept)
+
+        return all_detections
 
     def _detect_yolo(self, frame: np.ndarray) -> list[dict]:
         """
@@ -112,6 +191,7 @@ class CardDetector:
             frame,
             conf=cfg.CONFIDENCE_THRESHOLD,
             iou=cfg.IOU_THRESHOLD,
+            imgsz=cfg.YOLO_IMGSZ,
             verbose=False,
         )
 
@@ -143,6 +223,7 @@ class CardDetector:
             frame,
             conf=cfg.CONFIDENCE_THRESHOLD,
             iou=cfg.IOU_THRESHOLD,
+            imgsz=cfg.YOLO_IMGSZ,
             verbose=False,
         )
 
@@ -254,13 +335,20 @@ class CardDetector:
         dealer, player, unknown = [], [], []
 
         for det in detections:
-            cy = det["center"][1]
-            if cfg.DEALER_ZONE_Y[0] <= cy <= cfg.DEALER_ZONE_Y[1]:
+            zone = det.get("zone")
+            if zone == "dealer":
                 dealer.append(det["class_name"])
-            elif cfg.PLAYER_ZONE_Y[0] <= cy <= cfg.PLAYER_ZONE_Y[1]:
+            elif zone == "player":
                 player.append(det["class_name"])
             else:
-                unknown.append(det["class_name"])
+                # Fallback to Y-coordinate heuristic (full-frame mode)
+                cy = det["center"][1]
+                if cfg.DEALER_ZONE_Y[0] <= cy <= cfg.DEALER_ZONE_Y[1]:
+                    dealer.append(det["class_name"])
+                elif cfg.PLAYER_ZONE_Y[0] <= cy <= cfg.PLAYER_ZONE_Y[1]:
+                    player.append(det["class_name"])
+                else:
+                    unknown.append(det["class_name"])
 
         return {
             "dealer": dealer,
