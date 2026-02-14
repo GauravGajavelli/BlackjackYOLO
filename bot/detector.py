@@ -8,6 +8,9 @@ When pipeline mode is active, YOLO provides bounding boxes and a
 fine-tuned ResNet18 classifies each crop (97.8% test accuracy).
 """
 
+import math
+from collections import defaultdict
+
 import numpy as np
 from PIL import Image
 from ultralytics import YOLO
@@ -33,8 +36,9 @@ def _compute_iou(box_a, box_b):
 class CardDetector:
     """Thin wrapper around a YOLO model for card detection."""
 
-    def __init__(self, model_path: str = cfg.MODEL_PATH, pipeline: bool = cfg.PIPELINE_MODE):
+    def __init__(self, model_path: str = cfg.MODEL_PATH, pipeline: bool = cfg.PIPELINE_MODE, debug: bool = False):
         self.pipeline = pipeline
+        self.debug = debug
 
         print(f"[detector] Loading YOLO model from {model_path} ...")
         self.model = YOLO(model_path)
@@ -88,6 +92,52 @@ class CardDetector:
 
         print(f"[detector] Pipeline mode: YOLO + ResNet18 on {device}")
         print(f"[detector] CNN classes: {num_classes}, threshold: {cfg.CNN_CONFIDENCE_THRESHOLD}")
+
+    @staticmethod
+    def _dedup_same_class(detections: list[dict], debug: bool = False) -> list[dict]:
+        """
+        Merge two same-class detections that are geometrically consistent
+        with being the top-left and bottom-right corners of one physical card.
+
+        Three criteria must ALL hold to merge (keep higher confidence):
+          C1: Euclidean distance between centers <= DEDUP_SAME_CARD_MAX_DIST
+          C2: |dy| >= DEDUP_MIN_DY  (corners span the card height)
+          C3: dx * dy > 0  (TL is upper-left of BR — diagonal direction)
+        """
+        max_dist = cfg.DEDUP_SAME_CARD_MAX_DIST
+        min_dy = cfg.DEDUP_MIN_DY
+
+        groups: dict[str, list[int]] = defaultdict(list)
+        for i, det in enumerate(detections):
+            groups[det["class_name"]].append(i)
+
+        suppressed: set[int] = set()
+
+        for cls, indices in groups.items():
+            if len(indices) < 2:
+                continue
+            indices.sort(key=lambda i: detections[i]["confidence"], reverse=True)
+            for a in range(len(indices)):
+                i = indices[a]
+                if i in suppressed:
+                    continue
+                for b in range(a + 1, len(indices)):
+                    j = indices[b]
+                    if j in suppressed:
+                        continue
+                    cx_i, cy_i = detections[i]["center"]
+                    cx_j, cy_j = detections[j]["center"]
+                    dx = cx_j - cx_i
+                    dy = cy_j - cy_i
+                    dist = math.hypot(dx, dy)
+                    merge = dist <= max_dist and abs(dy) >= min_dy and dx * dy > 0
+                    if debug:
+                        print(f"[dedup] {cls} pair: dx={dx:.0f} dy={dy:.0f} "
+                              f"dist={dist:.0f} → {'MERGE' if merge else 'keep both'}")
+                    if merge:
+                        suppressed.add(j)
+
+        return [d for i, d in enumerate(detections) if i not in suppressed]
 
     def detect(self, frame: np.ndarray) -> list[dict]:
         """Top-level dispatcher: zone-based or full-frame detection."""
@@ -168,6 +218,7 @@ class CardDetector:
                 ):
                     kept.append(det)
 
+            kept = self._dedup_same_class(kept, debug=self.debug)
             all_detections.extend(kept)
 
         return all_detections
@@ -317,7 +368,7 @@ class CardDetector:
                     mean_color = region.mean(axis=(0, 1)).astype(np.uint8)
                     current_frame[py1:py2, px1:px2] = mean_color
 
-        return all_detections
+        return self._dedup_same_class(all_detections, debug=self.debug)
 
     def parse_hands(self, detections: list[dict]) -> dict:
         """

@@ -33,7 +33,7 @@ if args.debug:
 app = Flask(__name__, static_folder="game")
 
 # ── Load model and state at startup ──────────────────────────────────────────
-detector = CardDetector(pipeline=args.pipeline)
+detector = CardDetector(pipeline=args.pipeline, debug=args.debug)
 counter = HiLoCounter()
 prev_seen: set[str] = set()  # cards seen this hand (avoid double-counting)
 
@@ -76,32 +76,32 @@ def detect():
     detections = detector.detect_with_masking(frame)
     hands = detector.parse_hands(detections)
 
-    # Debug: save frame, zone crops, and log detections grouped by zone
+    # Log detections grouped by zone (always)
+    h, w = frame.shape[:2]
+    by_zone: dict[str, list] = {"dealer": [], "player": [], "unknown": []}
+    for det in detections:
+        z = det.get("zone", "unknown")
+        by_zone.setdefault(z, []).append(det)
+
+    for zone_name in ("dealer", "player", "unknown"):
+        zone_dets = by_zone.get(zone_name, [])
+        if zone_dets:
+            cards_str = ", ".join(
+                f"{d['class_name']} {d['confidence']:.2f}" for d in zone_dets
+            )
+            print(f"[detect] {zone_name.upper()} ({len(zone_dets)}): {cards_str}", flush=True)
+
+    if not detections:
+        print("[detect] No detections", flush=True)
+
+    # Debug: save frame and zone tile images to disk
     if args.debug:
         ts = int(_time.time() * 1000)
-        h, w = frame.shape[:2]
 
         # Save full frame
         debug_path = f"{DEBUG_DIR}/frame_{ts}.png"
         saved = cv2.imwrite(debug_path, frame)
         print(f"[debug] {'Saved' if saved else 'FAILED to save'} {debug_path} | {w}x{h} | {len(detections)} detections", flush=True)
-
-        # Group detections by zone and log
-        by_zone: dict[str, list] = {"dealer": [], "player": [], "unknown": []}
-        for det in detections:
-            z = det.get("zone", "unknown")
-            by_zone.setdefault(z, []).append(det)
-
-        for zone_name in ("dealer", "player", "unknown"):
-            zone_dets = by_zone.get(zone_name, [])
-            if zone_dets:
-                cards_str = ", ".join(
-                    f"{d['class_name']} {d['confidence']:.2f}" for d in zone_dets
-                )
-                print(f"[debug]   {zone_name.upper()} ({len(zone_dets)}): {cards_str}", flush=True)
-
-        if not detections:
-            print("[debug]   No detections — check saved image for card visibility", flush=True)
 
         # Save zone tiles (the actual square crops fed to YOLO)
         import config.settings as _cfg

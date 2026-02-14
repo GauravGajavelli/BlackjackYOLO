@@ -37,6 +37,8 @@ DECKS_IN_SHOE = 6               # Typical shoe size; adjust for your game
 MAX_DETECTION_PASSES = 3        # Max YOLO passes with masking
 MASK_PADDING = 5                # Pixels to pad around bbox when masking
 DEDUP_IOU_THRESHOLD = 0.50      # IoU threshold for duplicate filtering
+DEDUP_SAME_CARD_MAX_DIST = 130  # Max Euclidean distance (px) between same-class centers
+DEDUP_MIN_DY = 30               # Min |dy| to consider two detections as card corners
 
 # ---------------------------------------------------------------------------
 # Two-Stage Pipeline (YOLO + ResNet18)
