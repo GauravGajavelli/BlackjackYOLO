@@ -96,16 +96,25 @@ class CardDetector:
     @staticmethod
     def _dedup_same_class(detections: list[dict], debug: bool = False) -> list[dict]:
         """
-        Merge two same-class detections that are geometrically consistent
-        with being the top-left and bottom-right corners of one physical card.
+        Three-pass dedup for multi-corner card detections.
 
-        Three criteria must ALL hold to merge (keep higher confidence):
-          C1: Euclidean distance between centers <= DEDUP_SAME_CARD_MAX_DIST
-          C2: |dy| >= DEDUP_MIN_DY  (corners span the card height)
-          C3: dx * dy > 0  (TL is upper-left of BR — diagonal direction)
+        Pass 1 — Same-class diagonal + vertical (TL↔BR, TL↔BL, TR↔BR):
+          diagonal: dist ≤ max_dist AND |dy| ≥ min_dy AND dx*dy > 0
+          vertical: dist ≤ max_dist AND |dx| ≤ corner_tol AND |dy| ≥ min_dy
+
+        Pass 2 — Same-class horizontal (TL↔TR, BL↔BR survivors):
+          dist ≤ horiz_max
+
+        Pass 3 — Cross-class proximity (catches corners misclassified as
+          different suits, e.g. Kh TL + Kd TR on the same physical card):
+          dist ≤ horiz_max, regardless of class
+
+        All passes keep the higher-confidence detection.
         """
         max_dist = cfg.DEDUP_SAME_CARD_MAX_DIST
         min_dy = cfg.DEDUP_MIN_DY
+        corner_tol = cfg.DEDUP_CORNER_TOLERANCE
+        horiz_max = cfg.DEDUP_HORIZ_MAX_DIST
 
         groups: dict[str, list[int]] = defaultdict(list)
         for i, det in enumerate(detections):
@@ -117,6 +126,8 @@ class CardDetector:
             if len(indices) < 2:
                 continue
             indices.sort(key=lambda i: detections[i]["confidence"], reverse=True)
+
+            # --- Pass 1: diagonal + vertical merges ---
             for a in range(len(indices)):
                 i = indices[a]
                 if i in suppressed:
@@ -130,12 +141,66 @@ class CardDetector:
                     dx = cx_j - cx_i
                     dy = cy_j - cy_i
                     dist = math.hypot(dx, dy)
-                    merge = dist <= max_dist and abs(dy) >= min_dy and dx * dy > 0
+                    diagonal = dist <= max_dist and abs(dy) >= min_dy and dx * dy > 0
+                    vertical = dist <= max_dist and abs(dx) <= corner_tol and abs(dy) >= min_dy
+                    merge = diagonal or vertical
                     if debug:
-                        print(f"[dedup] {cls} pair: dx={dx:.0f} dy={dy:.0f} "
-                              f"dist={dist:.0f} → {'MERGE' if merge else 'keep both'}")
+                        reason = "diagonal" if diagonal else ("vertical" if vertical else "")
+                        tag = f"MERGE-P1({reason})" if merge else "keep both"
+                        print(f"[dedup] {cls} P1: dx={dx:.0f} dy={dy:.0f} "
+                              f"dist={dist:.0f} → {tag}")
                     if merge:
                         suppressed.add(j)
+
+            # --- Pass 2: horizontal merges on survivors ---
+            survivors = [i for i in indices if i not in suppressed]
+            for a in range(len(survivors)):
+                i = survivors[a]
+                if i in suppressed:
+                    continue
+                for b in range(a + 1, len(survivors)):
+                    j = survivors[b]
+                    if j in suppressed:
+                        continue
+                    cx_i, cy_i = detections[i]["center"]
+                    cx_j, cy_j = detections[j]["center"]
+                    dx = cx_j - cx_i
+                    dy = cy_j - cy_i
+                    dist = math.hypot(dx, dy)
+                    merge = dist <= horiz_max
+                    if debug:
+                        tag = "MERGE-P2(horiz)" if merge else "keep both"
+                        print(f"[dedup] {cls} P2: dx={dx:.0f} dy={dy:.0f} "
+                              f"dist={dist:.0f} → {tag}")
+                    if merge:
+                        suppressed.add(j)
+
+        # --- Pass 3: cross-class proximity suppression ---
+        # Two corners of the same card may be detected as different classes
+        # (e.g. TL="Kh", TR="Kd" or TL="Kc", BL="9c"). Uses a wider radius
+        # than pass 2 to catch vertical pairs (~93px) across classes.
+        # Safe because passes 1-2 already collapsed same-class corners,
+        # so surviving cross-card detections are ≥112px apart.
+        cross_dist = getattr(cfg, "DEDUP_CROSS_CLASS_DIST", horiz_max)
+        remaining = [i for i in range(len(detections)) if i not in suppressed]
+        remaining.sort(key=lambda i: detections[i]["confidence"], reverse=True)
+        for a in range(len(remaining)):
+            i = remaining[a]
+            if i in suppressed:
+                continue
+            for b in range(a + 1, len(remaining)):
+                j = remaining[b]
+                if j in suppressed:
+                    continue
+                cx_i, cy_i = detections[i]["center"]
+                cx_j, cy_j = detections[j]["center"]
+                dist = math.hypot(cx_j - cx_i, cy_j - cy_i)
+                if dist <= cross_dist:
+                    if debug:
+                        print(f"[dedup] {detections[i]['class_name']} vs "
+                              f"{detections[j]['class_name']} P3: dist={dist:.0f}"
+                              f" → MERGE-P3(cross-class)")
+                    suppressed.add(j)
 
         return [d for i, d in enumerate(detections) if i not in suppressed]
 
@@ -238,9 +303,10 @@ class CardDetector:
             ...
         ]
         """
+        floor = getattr(cfg, "CONFIDENCE_FLOOR", cfg.CONFIDENCE_THRESHOLD)
         results = self.model.predict(
             frame,
-            conf=cfg.CONFIDENCE_THRESHOLD,
+            conf=floor,
             iou=cfg.IOU_THRESHOLD,
             imgsz=cfg.YOLO_IMGSZ,
             verbose=False,
@@ -270,9 +336,10 @@ class CardDetector:
         torch = self._torch
 
         # Stage 1: YOLO bounding boxes (use low conf to catch more cards)
+        floor = getattr(cfg, "CONFIDENCE_FLOOR", cfg.CONFIDENCE_THRESHOLD)
         results = self.model.predict(
             frame,
-            conf=cfg.CONFIDENCE_THRESHOLD,
+            conf=floor,
             iou=cfg.IOU_THRESHOLD,
             imgsz=cfg.YOLO_IMGSZ,
             verbose=False,

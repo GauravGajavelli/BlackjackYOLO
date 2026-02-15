@@ -6,7 +6,8 @@ config/settings.py — All tunable parameters in one place.
 # YOLO Model
 # ---------------------------------------------------------------------------
 MODEL_PATH = "models/best.pt"    # Path to your trained YOLO weights
-CONFIDENCE_THRESHOLD = 0.45      # Minimum detection confidence to accept
+CONFIDENCE_THRESHOLD = 0.16      # Minimum detection confidence to accept
+CONFIDENCE_FLOOR = 0.05          # Lowest confidence kept for P-R curve logging
 IOU_THRESHOLD = 0.40             # NMS IoU threshold
 
 # ---------------------------------------------------------------------------
@@ -37,8 +38,11 @@ DECKS_IN_SHOE = 6               # Typical shoe size; adjust for your game
 MAX_DETECTION_PASSES = 3        # Max YOLO passes with masking
 MASK_PADDING = 5                # Pixels to pad around bbox when masking
 DEDUP_IOU_THRESHOLD = 0.50      # IoU threshold for duplicate filtering
-DEDUP_SAME_CARD_MAX_DIST = 130  # Max Euclidean distance (px) between same-class centers
+DEDUP_SAME_CARD_MAX_DIST = 150  # Max Euclidean distance (px) between same-class centers
 DEDUP_MIN_DY = 30               # Min |dy| to consider two detections as card corners
+DEDUP_CORNER_TOLERANCE = 25     # Max |dx| for vertical corner pair (TL+BL, TR+BR)
+DEDUP_HORIZ_MAX_DIST = 70       # Pass-2 radius for horizontal corner pairs (TL+TR, BL+BR)
+DEDUP_CROSS_CLASS_DIST = 100    # Pass-3 radius for cross-class corner suppression
 
 # ---------------------------------------------------------------------------
 # Two-Stage Pipeline (YOLO + ResNet18)

@@ -35,9 +35,9 @@
     left: 50%;
     transform: translateX(-50%);
     display: flex;
-    gap: 10px;
+    gap: 12px;
     justify-content: center;
-    min-height: 120px;
+    min-height: 150px;
   }
   #dealer-zone { top: 40px; }
   #player-zone { bottom: 40px; }
@@ -55,8 +55,8 @@
 
   /* ── Cards ────────────────────────────────────────────── */
   .card {
-    width: 80px;
-    height: 115px;
+    width: 100px;
+    height: 143px;
     background: #fff;
     border-radius: 8px;
     overflow: hidden;
@@ -89,8 +89,8 @@
     font-size: 16px;
     font-weight: bold;
   }
-  #dealer-total { top: 170px; }
-  #player-total { bottom: 170px; }
+  #dealer-total { top: 200px; }
+  #player-total { bottom: 200px; }
 
   /* ── Info bar ─────────────────────────────────────────── */
   #info {
@@ -1018,6 +1018,18 @@ setButtons(true);
     }
 
     const allFP = dealerComp.falsePositives.concat(playerComp.falsePositives);
+
+    // Log per-card-type performance to server
+    fetch('/api/log_performance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        actual_dealer: actualDealer,
+        actual_player: actualPlayer,
+        detected_dealer: detDealer,
+        detected_player: detPlayer
+      })
+    }).catch(function(err) { console.warn('[perf] log_performance failed:', err); });
 
     let html = '<h2>HAND SUMMARY</h2>';
     html += '<div class="summary-result ' + resultClass + '">' + resultText + '</div>';

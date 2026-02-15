@@ -8,10 +8,13 @@ basic strategy lookup, and Hi-Lo card counting.
 import argparse
 import base64
 import io
+import json
+import os
 
 import cv2
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
+import config.settings as settings
 from PIL import Image
 
 from bot.detector import CardDetector
@@ -36,6 +39,7 @@ app = Flask(__name__, static_folder="game")
 detector = CardDetector(pipeline=args.pipeline, debug=args.debug)
 counter = HiLoCounter()
 prev_seen: set[str] = set()  # cards seen this hand (avoid double-counting)
+_last_raw_detections: list[dict] = []  # unfiltered detections for P-R logging
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -73,8 +77,17 @@ def detect():
     frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     # Run detection (YOLO or pipeline) with iterative masking
-    detections = detector.detect_with_masking(frame)
+    # Returns all detections above CONFIDENCE_FLOOR for P-R logging
+    all_detections = detector.detect_with_masking(frame)
+
+    # Post-filter at the live threshold for game decisions
+    conf_thresh = settings.CONFIDENCE_THRESHOLD
+    detections = [d for d in all_detections if d["confidence"] >= conf_thresh]
     hands = detector.parse_hands(detections)
+
+    # Stash unfiltered detections for log_performance P-R curve data
+    global _last_raw_detections
+    _last_raw_detections = all_detections
 
     # Log detections grouped by zone (always)
     h, w = frame.shape[:2]
@@ -241,6 +254,100 @@ def reset_count():
     counter.reset()
     prev_seen = set()
     return jsonify({"status": "ok", "running_count": 0, "true_count": 0.0})
+
+
+# ── Performance tracking ─────────────────────────────────────────────────────
+
+PERF_DIR = os.path.join(os.path.dirname(__file__) or ".", "performance")
+PERF_FILE = os.path.join(PERF_DIR, "card_stats.json")
+PR_LOG_FILE = os.path.join(PERF_DIR, "pr_raw.jsonl")
+
+os.makedirs(PERF_DIR, exist_ok=True)
+
+
+def _load_perf_stats() -> dict:
+    """Load accumulated per-card-type stats from disk."""
+    if os.path.exists(PERF_FILE):
+        with open(PERF_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_perf_stats(stats: dict):
+    """Write accumulated stats to disk (atomic via temp file)."""
+    tmp = PERF_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(stats, f, indent=2, sort_keys=True)
+    os.replace(tmp, PERF_FILE)
+
+
+@app.route("/api/log_performance", methods=["POST"])
+def log_performance():
+    """
+    Receive actual vs. detected cards for a completed hand and accumulate
+    per-card-type detection stats into performance/card_stats.json.
+
+    Request JSON: {
+        "actual_dealer": ["Kh", "5c"],
+        "actual_player": ["7d", "9s", "3h"],
+        "detected_dealer": ["Kh"],
+        "detected_player": ["7d", "9s"]
+    }
+
+    For each actual card, records whether it was detected or missed.
+    Also tracks false positives per card type.
+    """
+    data = request.get_json(force=True)
+    actual = data.get("actual_dealer", []) + data.get("actual_player", [])
+    detected = data.get("detected_dealer", []) + data.get("detected_player", [])
+
+    stats = _load_perf_stats()
+
+    # Match detected against actual (same logic as JS compareCards)
+    det_pool = list(detected)
+    for card in actual:
+        entry = stats.setdefault(card, {"appeared": 0, "detected": 0, "missed": 0, "false_positive": 0})
+        entry["appeared"] += 1
+        idx = None
+        for i, d in enumerate(det_pool):
+            if d == card:
+                idx = i
+                break
+        if idx is not None:
+            entry["detected"] += 1
+            det_pool.pop(idx)
+        else:
+            entry["missed"] += 1
+
+    # Remaining in det_pool are false positives
+    for card in det_pool:
+        entry = stats.setdefault(card, {"appeared": 0, "detected": 0, "missed": 0, "false_positive": 0})
+        entry["false_positive"] += 1
+
+    _save_perf_stats(stats)
+
+    # Append raw detections (all confidence levels) for P-R curve analysis
+    global _last_raw_detections
+    pr_record = {
+        "actual": actual,
+        "raw_detections": [
+            {"class_name": d["class_name"], "confidence": round(d["confidence"], 4),
+             "zone": d.get("zone", "unknown")}
+            for d in _last_raw_detections
+        ],
+    }
+    with open(PR_LOG_FILE, "a") as f:
+        f.write(json.dumps(pr_record) + "\n")
+
+    # Compute summary for response
+    total_appeared = sum(e["appeared"] for e in stats.values())
+    total_detected = sum(e["detected"] for e in stats.values())
+    rate = round(total_detected / total_appeared * 100, 1) if total_appeared else 0
+
+    print(f"[perf] Hand logged: {len(actual)} actual, {len(detected)} detected | "
+          f"Cumulative: {total_detected}/{total_appeared} ({rate}%)", flush=True)
+
+    return jsonify({"status": "ok", "cumulative_rate": rate})
 
 
 if __name__ == "__main__":
