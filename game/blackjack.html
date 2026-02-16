@@ -946,6 +946,9 @@ document.getElementById('btn-fast').addEventListener('click', () => {
     if (source === 'model') {
       $hudSource.className = 'hud-status model';
       $hudSource.textContent = 'MODEL';
+    } else if (source === 'blind') {
+      $hudSource.className = 'hud-status error';
+      $hudSource.textContent = 'BLIND';
     } else {
       $hudSource.className = 'hud-status fallback';
       $hudSource.textContent = 'FALLBACK';
@@ -958,27 +961,6 @@ document.getElementById('btn-fast').addEventListener('click', () => {
   }
   function getDealerUpcard() {
     return dealer.length ? dealer[0].rank + dealer[0].suitCode : null;
-  }
-
-  // ── Ask backend for strategy (instant, from JS game state) ────
-  async function getStrategy() {
-    const playerCards = getPlayerCardNames();
-    const dealerUpcard = getDealerUpcard();
-    if (!playerCards.length || !dealerUpcard) return null;
-
-    setStrategyStatus('computing', 'COMPUTING');
-    const resp = await fetch('/api/strategy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        player_cards: playerCards,
-        dealer_upcard: dealerUpcard,
-        can_double: player.length === 2,
-      }),
-    });
-    const data = await resp.json();
-    setStrategyStatus('ready', 'READY');
-    return data;
   }
 
   // ── Execute the recommended action ────────────────────────────
@@ -1271,7 +1253,7 @@ document.getElementById('btn-fast').addEventListener('click', () => {
 
     html += '<div class="summary-stats">';
     html += '<div>Final Snapshot: <strong>' + totalCorrect + '/' + totalActual + ' (' + accuracy + '%)</strong></div>';
-    html += '<div>Decisions: <strong>' + modelActionCount + ' model</strong>, <strong>' + fallbackActionCount + ' fallback</strong></div>';
+    html += '<div>Decisions: <strong>' + modelActionCount + ' model</strong>, <strong>' + fallbackActionCount + ' blind</strong></div>';
     html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.1)">All Scans This Hand: <strong>' + handStats.scans + '</strong></div>';
     html += '<div>Total Detections: <strong>' + handStats.detections + '</strong> &mdash; '
           + '<span style="color:#2ecc71">' + handStats.correct + ' correct</span>, '
@@ -1341,35 +1323,36 @@ document.getElementById('btn-fast').addEventListener('click', () => {
         }
 
         // ── Game in progress → detect, decide, act ──────────────
-        const detData = await doDetection();
-        tallyDetection(detData);
-
+        // Bot only uses YOLO detections — no fallback to game state
+        let detData = null;
         let action = null;
-        let source = 'model';
 
-        // Try YOLO-based action
-        if (detData && detData.action && detData.action !== 'none' &&
-            detData.player_cards && detData.player_cards.length > 0 &&
-            detData.dealer_cards && detData.dealer_cards.length > 0) {
-          action = detData.action;
-          source = 'model';
-          updateHUD(detData);
-        }
+        for (let retry = 0; retry < 3; retry++) {
+          detData = await doDetection();
+          tallyDetection(detData);
 
-        // Fallback to JS game state
-        if (!action) {
-          const strat = await getStrategy();
-          if (strat) {
-            action = strat.action;
-            source = 'fallback';
-            updateHUD(strat);
+          if (detData && detData.action && detData.action !== 'none' &&
+              detData.player_cards && detData.player_cards.length > 0 &&
+              detData.dealer_cards && detData.dealer_cards.length > 0) {
+            action = detData.action;
+            updateHUD(detData);
+            break;
           }
+
+          // Retry after brief pause
+          if (retry < 2) await sleep(400 * BOT_SPEED);
         }
 
         if (action) {
-          if (source === 'model') modelActionCount++;
-          else fallbackActionCount++;
-          setSourceStatus(source);
+          modelActionCount++;
+          setSourceStatus('model');
+        } else {
+          // Model couldn't identify cards — stand as safe default
+          action = 'stand';
+          fallbackActionCount++;
+          setSourceStatus('blind');
+          $hudAction.textContent = 'STAND (BLIND)';
+          $hudAction.style.color = '#e74c3c';
         }
 
         if (!action) {
