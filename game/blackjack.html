@@ -137,6 +137,52 @@
     margin-bottom: 10px;
   }
 
+  /* ── Betting UI ──────────────────────────────────────── */
+  #betting-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 6px 0 8px;
+    padding: 10px 24px;
+    background: rgba(0,0,0,0.45);
+    border-radius: 8px;
+    font-size: 15px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  #betting-bar .bet-label { opacity: 0.6; margin-right: 4px; }
+  #betting-bar .bet-value { font-weight: bold; font-size: 18px; color: #f1c40f; }
+  #bet-input {
+    width: 80px;
+    padding: 6px 10px;
+    font-size: 16px;
+    border: 2px solid #f1c40f;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.4);
+    color: #fff;
+    text-align: center;
+    font-weight: bold;
+  }
+  #bet-input:focus { outline: none; border-color: #2ecc71; }
+  .bet-chip {
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: bold;
+    border: 2px solid rgba(255,255,255,0.2);
+    border-radius: 20px;
+    cursor: pointer;
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .bet-chip:hover { background: rgba(255,255,255,0.15); border-color: #f1c40f; }
+  .bet-chip.active { background: #f1c40f; color: #333; border-color: #f1c40f; }
+  #suggested-bet {
+    font-size: 12px;
+    opacity: 0.7;
+    color: #2ecc71;
+  }
+
   /* ── Bot overlay canvas ────────────────────────────────── */
   #overlay {
     position: absolute;
@@ -375,7 +421,18 @@
   <button id="btn-double" disabled>DOUBLE</button>
 </div>
 
-<div id="score-bar">Wins: <span id="wins">0</span> &nbsp;|&nbsp; Losses: <span id="losses">0</span> &nbsp;|&nbsp; Pushes: <span id="pushes">0</span></div>
+<div id="betting-bar">
+  <span><span class="bet-label">Bankroll:</span><span class="bet-value" id="bankroll-display">$1000</span></span>
+  <span><span class="bet-label">Bet:</span> $<input id="bet-input" type="number" min="10" max="500" step="10" value="10"></span>
+  <span class="bet-chip" data-bet="10">$10</span>
+  <span class="bet-chip" data-bet="25">$25</span>
+  <span class="bet-chip" data-bet="50">$50</span>
+  <span class="bet-chip" data-bet="100">$100</span>
+  <span><span class="bet-label">Current Bet:</span><span class="bet-value" id="current-bet-display">$10</span></span>
+  <span id="suggested-bet"></span>
+</div>
+
+<div id="score-bar">Wins: <span id="wins">0</span> &nbsp;|&nbsp; Losses: <span id="losses">0</span> &nbsp;|&nbsp; Pushes: <span id="pushes">0</span> &nbsp;|&nbsp; Net: <span id="net-profit">$0</span></div>
 
 <div id="bot-hud">
   <button id="btn-start-bot">START BOT</button>
@@ -393,6 +450,7 @@
   <div class="hud-item"><span class="hud-label">Running:</span><span class="hud-value" id="hud-running">0</span></div>
   <div class="hud-item"><span class="hud-label">True:</span><span class="hud-value" id="hud-true">0.0</span></div>
   <div class="hud-item"><span class="hud-label">Seen:</span><span class="hud-value" id="hud-seen">0</span></div>
+  <div class="hud-item"><span class="hud-label">Bet Units:</span><span class="hud-value" id="hud-bet-units">1</span></div>
 </div>
 
 <div id="model-section">
@@ -461,10 +519,13 @@ function handTotal(cards) {
 function isRed(suit) { return suit === '\u2665' || suit === '\u2666'; }
 
 // ── State ──────────────────────────────────────────────────────────
-let shoe = makeDeck(6);
+let shoe = makeDeck(1);
 let dealer = [], player = [];
 let gameOver = true;
 let stats = { wins: 0, losses: 0, pushes: 0 };
+let bankroll = 1000;
+let currentBet = 10;
+let doubled = false;
 
 const $dealerZone = document.getElementById('dealer-zone');
 const $playerZone = document.getElementById('player-zone');
@@ -475,6 +536,55 @@ const $deal = document.getElementById('btn-deal');
 const $hit = document.getElementById('btn-hit');
 const $stand = document.getElementById('btn-stand');
 const $double = document.getElementById('btn-double');
+const $betInput = document.getElementById('bet-input');
+const $bankrollDisplay = document.getElementById('bankroll-display');
+const $currentBetDisplay = document.getElementById('current-bet-display');
+const $suggestedBet = document.getElementById('suggested-bet');
+const $netProfit = document.getElementById('net-profit');
+
+// ── Betting helpers ────────────────────────────────────────────────
+function updateBankrollDisplay() {
+  $bankrollDisplay.textContent = '$' + bankroll;
+  $bankrollDisplay.style.color = bankroll >= 1000 ? '#2ecc71' : bankroll > 0 ? '#f1c40f' : '#e74c3c';
+  const net = bankroll - 1000;
+  $netProfit.textContent = (net >= 0 ? '+$' : '-$') + Math.abs(net);
+  $netProfit.style.color = net >= 0 ? '#2ecc71' : '#e74c3c';
+}
+
+function setBet(amount) {
+  amount = Math.max(10, Math.min(bankroll, amount));
+  currentBet = amount;
+  $betInput.value = amount;
+  $currentBetDisplay.textContent = '$' + amount;
+}
+
+function updateSuggestedBet(units) {
+  if (units && units > 0) {
+    const suggested = Math.min(bankroll, units * 10);
+    $suggestedBet.textContent = 'Hi-Lo suggests: $' + suggested + ' (' + units + ' unit' + (units > 1 ? 's' : '') + ')';
+  } else {
+    $suggestedBet.textContent = '';
+  }
+}
+
+// Chip click handlers
+document.querySelectorAll('.bet-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    if (!gameOver) return;
+    const val = parseInt(chip.dataset.bet);
+    setBet(val);
+    document.querySelectorAll('.bet-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+  });
+});
+
+$betInput.addEventListener('change', () => {
+  if (!gameOver) return;
+  setBet(parseInt($betInput.value) || 10);
+  document.querySelectorAll('.bet-chip').forEach(c => {
+    c.classList.toggle('active', parseInt(c.dataset.bet) === currentBet);
+  });
+});
 
 // ── Rendering ──────────────────────────────────────────────────────
 function renderCard(card, facedown = false) {
@@ -530,12 +640,16 @@ function setButtons(dealing) {
 
 // ── Game logic ─────────────────────────────────────────────────────
 function draw() {
-  if (shoe.length < 20) shoe = makeDeck(6);
+  if (shoe.length < 10) shoe = makeDeck(1);
   return shoe.pop();
 }
 
 function deal() {
   hideInfo();
+  // Lock in bet
+  setBet(parseInt($betInput.value) || 10);
+  doubled = false;
+  $betInput.disabled = true;
   dealer = [draw(), draw()];
   player = [draw(), draw()];
   gameOver = false;
@@ -553,9 +667,11 @@ function hit() {
   player.push(draw());
   render();
   if (handTotal(player) > 21) {
-    endRound('BUST \u2014 You lose');
+    bankroll -= currentBet;
+    endRound('BUST \u2014 -$' + currentBet);
     stats.losses++;
     updateStats();
+    updateBankrollDisplay();
   } else if (handTotal(player) === 21) {
     stand();
   }
@@ -565,12 +681,16 @@ function hit() {
 
 function doDouble() {
   if (gameOver || player.length !== 2) return;
+  doubled = true;
+  $currentBetDisplay.textContent = '$' + (currentBet * 2);
   player.push(draw());
   render();
   if (handTotal(player) > 21) {
-    endRound('BUST \u2014 You lose');
+    bankroll -= currentBet * 2;
+    endRound('BUST \u2014 -$' + (currentBet * 2));
     stats.losses++;
     updateStats();
+    updateBankrollDisplay();
   } else {
     stand();
   }
@@ -600,23 +720,33 @@ function dealerPlay() {
 function resolve() {
   const pt = handTotal(player);
   const dt = handTotal(dealer);
+  const mult = doubled ? 2 : 1;
+  const isBlackjack = (player.length === 2 && pt === 21);
   render(true);
 
   if (dt > 21) {
-    showInfo('Dealer busts \u2014 You win!');
+    const payout = isBlackjack ? Math.floor(currentBet * 1.5) : currentBet * mult;
+    showInfo('Dealer busts \u2014 You win +$' + payout + '!');
+    bankroll += payout;
     stats.wins++;
   } else if (pt > dt) {
-    showInfo('You win!');
+    const payout = isBlackjack ? Math.floor(currentBet * 1.5) : currentBet * mult;
+    showInfo('You win +$' + payout + '!');
+    bankroll += payout;
     stats.wins++;
   } else if (dt > pt) {
-    showInfo('Dealer wins');
+    const loss = currentBet * mult;
+    showInfo('Dealer wins \u2014 -$' + loss);
+    bankroll -= loss;
     stats.losses++;
   } else {
-    showInfo('Push');
+    showInfo('Push \u2014 $' + (currentBet * mult) + ' returned');
     stats.pushes++;
   }
   updateStats();
+  updateBankrollDisplay();
   setButtons(true);
+  $betInput.disabled = false;
 }
 
 function endRound(msg) {
@@ -624,6 +754,7 @@ function endRound(msg) {
   render(true);
   showInfo(msg);
   setButtons(true);
+  $betInput.disabled = false;
 }
 
 function clearTable() {
@@ -686,6 +817,7 @@ setButtons(true);
   let fallbackActionCount = 0;
   let botActive = false;
   let handStats = { scans: 0, detections: 0, correct: 0, wrong: 0 };
+  let lastSuggestedBetUnits = 1;
 
   function resetHandStats() {
     handStats = { scans: 0, detections: 0, correct: 0, wrong: 0 };
@@ -808,6 +940,11 @@ setButtons(true);
     $hudRunning.textContent = data.running_count;
     $hudTrue.textContent = data.true_count;
     $hudSeen.textContent = data.cards_seen;
+    if (data.suggested_bet_units !== undefined) {
+      lastSuggestedBetUnits = data.suggested_bet_units;
+      updateSuggestedBet(data.suggested_bet_units);
+      document.getElementById('hud-bet-units').textContent = data.suggested_bet_units;
+    }
   }
 
   // ── Capture table → base64 PNG ────────────────────────────────
@@ -1031,9 +1168,22 @@ setButtons(true);
       })
     }).catch(function(err) { console.warn('[perf] log_performance failed:', err); });
 
+    const mult = doubled ? 2 : 1;
+    const betAmount = currentBet * mult;
+    const isBlackjack = (player.length === 2 && pt === 21);
+    let payout = 0;
+    if (resultClass === 'win') payout = isBlackjack ? Math.floor(currentBet * 1.5) : betAmount;
+    else if (resultClass === 'loss') payout = -betAmount;
+
     let html = '<h2>HAND SUMMARY</h2>';
     html += '<div class="summary-result ' + resultClass + '">' + resultText + '</div>';
     html += '<div class="summary-totals">Player: ' + pt + ' | Dealer: ' + dt + '</div>';
+    html += '<div class="summary-totals" style="opacity:1">';
+    html += 'Bet: <strong>$' + betAmount + '</strong>';
+    if (doubled) html += ' (doubled)';
+    html += ' | Result: <strong style="color:' + (payout >= 0 ? '#2ecc71' : '#e74c3c') + '">' + (payout >= 0 ? '+$' + payout : '-$' + Math.abs(payout)) + '</strong>';
+    html += ' | Bankroll: <strong>$' + bankroll + '</strong>';
+    html += '</div>';
 
     html += '<div class="summary-section"><h3>DEALER CARDS</h3>';
     html += '<div class="summary-cards">' + renderComparison(dealerComp) + '</div></div>';
@@ -1099,6 +1249,11 @@ setButtons(true);
           resetHandStats();
           olCtx.clearRect(0, 0, 820, 520);
           await fetch('/api/new_hand', { method: 'POST' });
+
+          // Auto-set bet based on last Hi-Lo suggestion
+          const suggestedAmount = Math.min(bankroll, Math.max(10, lastSuggestedBetUnits * 10));
+          setBet(suggestedAmount);
+
           $hudAction.textContent = 'DEALING...';
           $hudAction.style.color = '#f1c40f';
           $hudSource.className = 'hud-status idle';

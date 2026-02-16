@@ -198,6 +198,7 @@ def detect():
         "true_count": round(counter.true_count, 1),
         "cards_seen": counter.cards_seen,
         "total_passes": total_passes,
+        "suggested_bet_units": counter.suggested_bet_units,
     })
 
 
@@ -236,6 +237,7 @@ def strategy():
         "running_count": counter.running_count,
         "true_count": round(counter.true_count, 1),
         "cards_seen": counter.cards_seen,
+        "suggested_bet_units": counter.suggested_bet_units,
     })
 
 

@@ -30,7 +30,7 @@ CLASS_NAMES = [f"{r}{s}" for r in RANKS for s in SUITS]  # 52 classes
 # ---------------------------------------------------------------------------
 # Hi-Lo Counting
 # ---------------------------------------------------------------------------
-DECKS_IN_SHOE = 6               # Typical shoe size; adjust for your game
+DECKS_IN_SHOE = 1               # Single deck for faster convergence in demo
 
 # ---------------------------------------------------------------------------
 # Iterative Masking Detection

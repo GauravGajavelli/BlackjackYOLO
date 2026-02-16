@@ -105,9 +105,13 @@ class CardDetector:
         Pass 2 — Same-class horizontal (TL↔TR, BL↔BR survivors):
           dist ≤ horiz_max
 
-        Pass 3 — Cross-class proximity (catches corners misclassified as
-          different suits, e.g. Kh TL + Kd TR on the same physical card):
-          dist ≤ horiz_max, regardless of class
+        Pass 3 — Cross-class corner suppression (catches corners of the
+          same physical card detected as different ranks/suits, e.g.
+          TL="Kh" + BR="Qd").  Uses the same diagonal/vertical geometry
+          as Pass 1 plus simple proximity, applied across all classes:
+          proximity: dist ≤ cross_dist
+          diagonal:  dist ≤ max_dist AND |dy| ≥ min_dy AND dx*dy > 0
+          vertical:  dist ≤ max_dist AND |dx| ≤ corner_tol AND |dy| ≥ min_dy
 
         All passes keep the higher-confidence detection.
         """
@@ -175,12 +179,12 @@ class CardDetector:
                     if merge:
                         suppressed.add(j)
 
-        # --- Pass 3: cross-class proximity suppression ---
-        # Two corners of the same card may be detected as different classes
-        # (e.g. TL="Kh", TR="Kd" or TL="Kc", BL="9c"). Uses a wider radius
-        # than pass 2 to catch vertical pairs (~93px) across classes.
-        # Safe because passes 1-2 already collapsed same-class corners,
-        # so surviving cross-card detections are ≥112px apart.
+        # --- Pass 3: cross-class corner suppression ---
+        # Two corners of the same physical card may be detected as different
+        # classes (different rank and/or suit, e.g. TL="Kh" + BR="Qd").
+        # Uses the same geometric checks as Pass 1 (diagonal, vertical) plus
+        # simple proximity, applied across all classes.  Always keeps the
+        # higher-confidence detection.
         cross_dist = getattr(cfg, "DEDUP_CROSS_CLASS_DIST", horiz_max)
         remaining = [i for i in range(len(detections)) if i not in suppressed]
         remaining.sort(key=lambda i: detections[i]["confidence"], reverse=True)
@@ -194,12 +198,21 @@ class CardDetector:
                     continue
                 cx_i, cy_i = detections[i]["center"]
                 cx_j, cy_j = detections[j]["center"]
-                dist = math.hypot(cx_j - cx_i, cy_j - cy_i)
-                if dist <= cross_dist:
+                dx = cx_j - cx_i
+                dy = cy_j - cy_i
+                dist = math.hypot(dx, dy)
+                proximity = dist <= cross_dist
+                diagonal = dist <= max_dist and abs(dy) >= min_dy and dx * dy > 0
+                vertical = dist <= max_dist and abs(dx) <= corner_tol and abs(dy) >= min_dy
+                merge = proximity or diagonal or vertical
+                if merge:
                     if debug:
+                        reason = ("proximity" if proximity else
+                                  "diagonal" if diagonal else "vertical")
                         print(f"[dedup] {detections[i]['class_name']} vs "
-                              f"{detections[j]['class_name']} P3: dist={dist:.0f}"
-                              f" → MERGE-P3(cross-class)")
+                              f"{detections[j]['class_name']} P3: "
+                              f"dx={dx:.0f} dy={dy:.0f} dist={dist:.0f}"
+                              f" → MERGE-P3({reason})")
                     suppressed.add(j)
 
         return [d for i, d in enumerate(detections) if i not in suppressed]
