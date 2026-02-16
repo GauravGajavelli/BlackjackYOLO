@@ -222,12 +222,19 @@
   #btn-stop-bot { background: #e74c3c; color: #fff; display: none; padding: 6px 12px; font-size: 13px; border-radius: 4px; }
   #btn-reset-count { background: #3498db; color: #fff; }
 
-  /* ── Speed Controls (next to model perception) ──────────── */
+  /* ── Speed Controls (fixed, bottom right above art toggle) ── */
   #speed-controls {
-    display: inline-flex;
+    position: fixed;
+    bottom: 62px;
+    right: 16px;
+    display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 6px;
+    padding: 10px 16px;
+    background: rgba(0,0,0,0.7);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    z-index: 500;
   }
   .speed-btn {
     padding: 5px 14px;
@@ -249,6 +256,51 @@
     min-width: 40px;
     text-align: center;
   }
+
+  /* ── Art Toggle (bottom right) ───────────────────────────── */
+  #art-toggle {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: rgba(0,0,0,0.7);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    font-size: 13px;
+    z-index: 500;
+  }
+  #art-toggle .toggle-label { opacity: 0.6; font-weight: bold; letter-spacing: 1px; }
+  #art-toggle .toggle-switch {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    background: #2ecc71;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  #art-toggle .toggle-switch.old { background: #e67e22; }
+  #art-toggle .toggle-switch::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    background: #fff;
+    border-radius: 50%;
+    transition: left 0.2s;
+  }
+  #art-toggle .toggle-switch.old::after { left: 23px; }
+  #art-toggle .toggle-art-label {
+    font-weight: bold;
+    min-width: 70px;
+  }
+  #art-toggle .toggle-art-label.current { color: #2ecc71; }
+  #art-toggle .toggle-art-label.old { color: #e67e22; }
 
   /* Pipeline status badges */
   .hud-status {
@@ -468,7 +520,7 @@
   <button id="btn-reset-count">RESET COUNT</button>
   <div class="hud-item">
     <span class="hud-label">Strategy Action:</span><span class="hud-value" id="hud-action">&mdash;</span>
-    <span class="hud-sublabel">from game state (instant)</span>
+    <span class="hud-sublabel">from model detections</span>
   </div>
   <div class="hud-item"><span class="hud-label">Strategy:</span><span class="hud-status ready" id="hud-strategy">READY</span></div>
   <div class="hud-item"><span class="hud-label">YOLO:</span><span class="hud-status idle" id="hud-yolo">IDLE</span></div>
@@ -482,19 +534,24 @@
 </div>
 
 <div id="model-section">
-  <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:6px;">
-    <div id="speed-controls">
-      <button class="speed-btn" id="btn-slow">&#9664; SLOW</button>
-      <span id="speed-display">1.0x</span>
-      <button class="speed-btn" id="btn-fast">FAST &#9654;</button>
-    </div>
-    <h2 style="margin:0">MODEL PERCEPTION</h2>
-  </div>
+  <h2>MODEL PERCEPTION</h2>
   <div id="model-view-wrap">
     <canvas id="model-view" width="820" height="520"></canvas>
   </div>
   <div id="detection-readout">Waiting for bot...</div>
   <div id="detection-list"></div>
+</div>
+
+<div id="speed-controls">
+  <button class="speed-btn" id="btn-slow">&#9664; SLOW</button>
+  <span id="speed-display">1.0x</span>
+  <button class="speed-btn" id="btn-fast">FAST &#9654;</button>
+</div>
+
+<div id="art-toggle">
+  <span class="toggle-label">CARD ART</span>
+  <div class="toggle-switch" id="art-switch"></div>
+  <span class="toggle-art-label current" id="art-label">Training Set</span>
 </div>
 
 <script>
@@ -621,13 +678,16 @@ $betInput.addEventListener('change', () => {
   });
 });
 
+// ── Card art path (togglable) ─────────────────────────────────────
+let cardArtPath = '/game/cards/';
+
 // ── Rendering ──────────────────────────────────────────────────────
 function renderCard(card, facedown = false) {
   const el = document.createElement('div');
   el.className = 'card' + (facedown ? ' facedown' : '');
   if (!facedown) {
     const name = card.rank + card.suitCode;
-    el.innerHTML = `<img src="/game/cards/${name}.png" alt="${name}" draggable="false">`;
+    el.innerHTML = `<img src="${cardArtPath}${name}.png" alt="${name}" draggable="false">`;
   }
   return el;
 }
@@ -855,6 +915,27 @@ document.getElementById('btn-fast').addEventListener('click', () => {
     BOT_SPEED = SPEED_STEPS[speedIndex];
     updateSpeedDisplay();
   }
+});
+
+// ── Art toggle ────────────────────────────────────────────────────
+const $artSwitch = document.getElementById('art-switch');
+const $artLabel = document.getElementById('art-label');
+let usingOldArt = false;
+
+$artSwitch.addEventListener('click', () => {
+  usingOldArt = !usingOldArt;
+  cardArtPath = usingOldArt ? '/game/cards_old/' : '/game/cards/';
+  $artSwitch.classList.toggle('old', usingOldArt);
+  $artLabel.textContent = usingOldArt ? 'Old Art' : 'Training Set';
+  $artLabel.className = 'toggle-art-label ' + (usingOldArt ? 'old' : 'current');
+
+  // Re-render visible cards with new art
+  if (dealer.length || player.length) {
+    render(gameOver);
+  }
+
+  // Trigger YOLO re-detection if bot is active
+  if (window._triggerRedetect) window._triggerRedetect();
 });
 </script>
 
@@ -1121,6 +1202,13 @@ document.getElementById('btn-fast').addEventListener('click', () => {
       $detList.appendChild(card);
     }
   }
+
+  // ── Expose re-detection trigger for art toggle ──────────────
+  window._triggerRedetect = function() {
+    if (dealer.length || player.length) {
+      doDetection();
+    }
+  };
 
   // ── Run YOLO detection (awaitable, returns data) ──────────────
   async function doDetection() {
