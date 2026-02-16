@@ -216,11 +216,39 @@
     font-size: 13px;
     border-radius: 4px;
   }
-  #btn-start-bot { background: #2ecc71; color: #fff; }
-  #btn-start-bot.running { background: #e74c3c; }
-  #btn-pause-bot { background: #f39c12; color: #fff; display: none; }
-  #btn-pause-bot.paused { background: #3498db; }
+  #btn-start-bot { background: #2ecc71; color: #fff; min-width: 110px; }
+  #btn-start-bot.running { background: #f39c12; }
+  #btn-start-bot.paused { background: #3498db; }
+  #btn-stop-bot { background: #e74c3c; color: #fff; display: none; padding: 6px 12px; font-size: 13px; border-radius: 4px; }
   #btn-reset-count { background: #3498db; color: #fff; }
+
+  /* ── Speed Controls (next to model perception) ──────────── */
+  #speed-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .speed-btn {
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: bold;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+    cursor: pointer;
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    letter-spacing: 1px;
+    transition: background 0.15s;
+  }
+  .speed-btn:hover { background: rgba(255,255,255,0.18); }
+  #speed-display {
+    font-weight: bold;
+    font-size: 14px;
+    color: #f1c40f;
+    min-width: 40px;
+    text-align: center;
+  }
 
   /* Pipeline status badges */
   .hud-status {
@@ -436,7 +464,7 @@
 
 <div id="bot-hud">
   <button id="btn-start-bot">START BOT</button>
-  <button id="btn-pause-bot">PAUSE</button>
+  <button id="btn-stop-bot">STOP</button>
   <button id="btn-reset-count">RESET COUNT</button>
   <div class="hud-item">
     <span class="hud-label">Strategy Action:</span><span class="hud-value" id="hud-action">&mdash;</span>
@@ -454,7 +482,14 @@
 </div>
 
 <div id="model-section">
-  <h2>MODEL PERCEPTION</h2>
+  <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:6px;">
+    <div id="speed-controls">
+      <button class="speed-btn" id="btn-slow">&#9664; SLOW</button>
+      <span id="speed-display">1.0x</span>
+      <button class="speed-btn" id="btn-fast">FAST &#9654;</button>
+    </div>
+    <h2 style="margin:0">MODEL PERCEPTION</h2>
+  </div>
   <div id="model-view-wrap">
     <canvas id="model-view" width="820" height="520"></canvas>
   </div>
@@ -471,7 +506,7 @@ const RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
 // ── URL parameters ────────────────────────────────────────────────
 const _params = new URLSearchParams(window.location.search);
 const GAME_SEED = _params.has('seed') ? parseInt(_params.get('seed'), 10) : null;
-const BOT_SPEED = Math.max(0.25, Math.min(10, parseFloat(_params.get('speed')) || 2));
+let BOT_SPEED = Math.max(0.25, Math.min(10, parseFloat(_params.get('speed')) || 1));
 
 // ── Seeded PRNG (mulberry32) ──────────────────────────────────────
 function _mulberry32(a) {
@@ -783,6 +818,44 @@ document.addEventListener('keydown', e => {
 
 // Init
 setButtons(true);
+
+// ── Speed controls ─────────────────────────────────────────────────
+// BOT_SPEED is a sleep *multiplier* (higher = slower).
+// We display an intuitive "speed" where higher = faster.
+// displaySpeed = 1 / BOT_SPEED  (e.g., BOT_SPEED=0.5 → display "2.0x")
+const SPEED_STEPS = [0.25, 0.5, 1, 2, 4];  // BOT_SPEED values: 0.25=4x fast, 4=0.25x slow
+let speedIndex = SPEED_STEPS.indexOf(1);  // default to 1 (1.0x display)
+// Set initial BOT_SPEED from URL param — find closest step
+if (BOT_SPEED !== 1) {
+  let closest = 0;
+  for (let i = 0; i < SPEED_STEPS.length; i++) {
+    if (Math.abs(SPEED_STEPS[i] - BOT_SPEED) < Math.abs(SPEED_STEPS[closest] - BOT_SPEED)) closest = i;
+  }
+  speedIndex = closest;
+  BOT_SPEED = SPEED_STEPS[speedIndex];
+}
+
+const $speedDisplay = document.getElementById('speed-display');
+function updateSpeedDisplay() {
+  const displaySpeed = 1 / BOT_SPEED;
+  $speedDisplay.textContent = displaySpeed.toFixed(1) + 'x';
+}
+updateSpeedDisplay();
+
+document.getElementById('btn-slow').addEventListener('click', () => {
+  if (speedIndex < SPEED_STEPS.length - 1) {
+    speedIndex++;
+    BOT_SPEED = SPEED_STEPS[speedIndex];
+    updateSpeedDisplay();
+  }
+});
+document.getElementById('btn-fast').addEventListener('click', () => {
+  if (speedIndex > 0) {
+    speedIndex--;
+    BOT_SPEED = SPEED_STEPS[speedIndex];
+    updateSpeedDisplay();
+  }
+});
 </script>
 
 <!-- ── Bot Script ────────────────────────────────────────────────── -->
@@ -797,7 +870,7 @@ setButtons(true);
   const $readout = document.getElementById('detection-readout');
   const $detList = document.getElementById('detection-list');
   const $startBot = document.getElementById('btn-start-bot');
-  const $pauseBot = document.getElementById('btn-pause-bot');
+  const $stopBot = document.getElementById('btn-stop-bot');
   const $resetCount = document.getElementById('btn-reset-count');
   const $hudAction = document.getElementById('hud-action');
   const $hudStrategy = document.getElementById('hud-strategy');
@@ -1333,50 +1406,80 @@ setButtons(true);
     await sleep(300 * BOT_SPEED);
   }
 
+  // ── UI sync helpers ──────────────────────────────────────────
+  function syncBotUI() {
+    if (!botRunning) {
+      $startBot.textContent = 'START BOT';
+      $startBot.className = '';
+      $stopBot.style.display = 'none';
+    } else if (botPaused) {
+      $startBot.textContent = '\u25B6 RESUME';
+      $startBot.className = 'paused';
+      $stopBot.style.display = '';
+    } else {
+      $startBot.textContent = '\u275A\u275A PAUSE';
+      $startBot.className = 'running';
+      $stopBot.style.display = '';
+    }
+  }
+
+  function stopBot() {
+    botRunning = false;
+    botPaused = false;
+    handInProgress = false;
+    clearTimeout(botTimer);
+    olCtx.clearRect(0, 0, 820, 520);
+    $hudAction.textContent = '\u2014';
+    $hudAction.style.color = '#fff';
+    setYoloStatus('idle', 'IDLE');
+    setStrategyStatus('idle', 'IDLE');
+    $hudSource.className = 'hud-status idle';
+    $hudSource.textContent = '\u2014';
+    document.getElementById('summary-modal-overlay').style.display = 'none';
+    syncBotUI();
+  }
+
   // ── Button handlers ───────────────────────────────────────────
   $startBot.addEventListener('click', function() {
-    botRunning = !botRunning;
-    if (botRunning) {
-      $startBot.textContent = 'STOP BOT';
-      $startBot.classList.add('running');
-      $pauseBot.style.display = '';
+    if (!botRunning) {
+      // START
+      botRunning = true;
       botPaused = false;
       handInProgress = false;
-      $pauseBot.textContent = 'PAUSE';
-      $pauseBot.classList.remove('paused');
       setYoloStatus('idle', 'IDLE');
       setStrategyStatus('ready', 'READY');
       $hudSource.className = 'hud-status idle';
       $hudSource.textContent = '\u2014';
+      syncBotUI();
       botCycle();
-    } else {
-      $startBot.textContent = 'START BOT';
-      $startBot.classList.remove('running');
-      $pauseBot.style.display = 'none';
-      botPaused = false;
-      handInProgress = false;
+    } else if (!botPaused) {
+      // PAUSE
+      botPaused = true;
       clearTimeout(botTimer);
-      olCtx.clearRect(0, 0, 820, 520);
-      $hudAction.textContent = '\u2014';
-      $hudAction.style.color = '#fff';
-      setYoloStatus('idle', 'IDLE');
-      setStrategyStatus('idle', 'IDLE');
-      $hudSource.className = 'hud-status idle';
-      $hudSource.textContent = '\u2014';
-      document.getElementById('summary-modal-overlay').style.display = 'none';
+      syncBotUI();
+    } else {
+      // RESUME
+      botPaused = false;
+      syncBotUI();
+      botCycle();
     }
   });
 
-  $pauseBot.addEventListener('click', function() {
-    botPaused = !botPaused;
-    if (botPaused) {
-      $pauseBot.textContent = 'RESUME';
-      $pauseBot.classList.add('paused');
-      clearTimeout(botTimer);
-    } else {
-      $pauseBot.textContent = 'PAUSE';
-      $pauseBot.classList.remove('paused');
-      botCycle();
+  $stopBot.addEventListener('click', stopBot);
+
+  // Spacebar shortcut for pause/resume during presentation
+  document.addEventListener('keydown', function(e) {
+    if (e.code === 'Space' && botRunning && e.target === document.body) {
+      e.preventDefault();
+      // Toggle pause/resume
+      if (!botPaused) {
+        botPaused = true;
+        clearTimeout(botTimer);
+      } else {
+        botPaused = false;
+        botCycle();
+      }
+      syncBotUI();
     }
   });
 
