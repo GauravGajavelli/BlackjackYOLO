@@ -475,9 +475,46 @@
     letter-spacing: 1px;
   }
   #btn-summary-continue:hover { background: #27ae60; }
+
+  /* ── Demo notification bar ───────────────────────────── */
+  #demo-notify {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10000;
+    background: linear-gradient(135deg, #e67e22, #d35400);
+    color: #fff;
+    padding: 12px 24px;
+    font-size: 15px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-align: center;
+    transform: translateY(-100%);
+    transition: transform 0.3s ease;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+  }
+  #demo-notify.visible {
+    transform: translateY(0);
+  }
+  #demo-notify .notify-detail {
+    font-weight: normal;
+    font-size: 13px;
+    opacity: 0.9;
+    margin-top: 2px;
+  }
+  #demo-notify .notify-hint {
+    font-weight: normal;
+    font-size: 11px;
+    opacity: 0.6;
+    margin-top: 4px;
+    letter-spacing: 0;
+  }
 </style>
 </head>
 <body>
+
+<div id="demo-notify"></div>
 
 <h1>&#9824; BLACKJACK &#9824;</h1>
 
@@ -883,7 +920,7 @@ setButtons(true);
 // BOT_SPEED is a sleep *multiplier* (higher = slower).
 // We display an intuitive "speed" where higher = faster.
 // displaySpeed = 1 / BOT_SPEED  (e.g., BOT_SPEED=0.5 → display "2.0x")
-const SPEED_STEPS = [0.25, 0.5, 1, 2, 4];  // BOT_SPEED values: 0.25=4x fast, 4=0.25x slow
+const SPEED_STEPS = [0.125, 0.25, 0.5, 1, 2, 4];  // BOT_SPEED values: 0.125=8x fast, 4=0.25x slow
 let speedIndex = SPEED_STEPS.indexOf(1);  // default to 1 (1.0x display)
 // Set initial BOT_SPEED from URL param — find closest step
 if (BOT_SPEED !== 1) {
@@ -972,6 +1009,104 @@ $artSwitch.addEventListener('click', () => {
   let botActive = false;
   let handStats = { scans: 0, detections: 0, correct: 0, wrong: 0 };
   let lastSuggestedBetUnits = 1;
+  let demoHandCount = 0;
+
+  // ═════════════════════════════════════════════════════════════
+  // DEMO MODE CONFIGURATION
+  // Controls autoplay behavior for presentations.
+  // The bot auto-plays at demoSpeed with NO hand summary modal.
+  // When a stop condition first fires, the bot pauses and a
+  // notification bar appears at the top.  Press Space / Resume
+  // to continue.
+  //
+  // Phase 2: when bankroll >= bankrollThreshold, old card art
+  // is activated and the bot keeps going until a King or Jack
+  // is missed.
+  //
+  // Each stop's test() returns a details string if the condition
+  // is met, or null otherwise.  Modify / reorder / add entries
+  // as needed.
+  //
+  // URL param:  ?demo=false  to disable demo mode entirely
+  // ═════════════════════════════════════════════════════════════
+  const DEMO = {
+    enabled: _params.get('demo') !== 'false',
+    speed: 0.125,           // BOT_SPEED during autoplay (0.125 = 8x display)
+    introHands: 2,          // first N hands play at introSpeed with modal
+    introSpeed: [2, 1],     // BOT_SPEED per intro hand (2=0.5x, 1=1x); last value repeats
+    originalSpeed: null,    // saved when bot starts, restored when demo ends
+    bankrollThreshold: 1500, // bankroll >= this triggers Phase 2 (old art)
+
+    // ── Phase 1 stops (first instance of each) ───────────────
+    stops: [
+      {
+        id: 'bottomCorrect',
+        label: 'Bottom-of-card rank identified correctly',
+        triggered: false,
+        test(ctx) {
+          const d = ctx.bottomDetections.find(det => ctx.actualAll.includes(det.class_name));
+          return d ? 'Detected ' + d.class_name + ' from bottom corner' : null;
+        },
+      },
+      {
+        id: 'bottomIncorrect',
+        label: 'Bottom-of-card rank identified incorrectly',
+        triggered: false,
+        test(ctx) {
+          const d = ctx.bottomDetections.find(det => !ctx.actualAll.includes(det.class_name));
+          return d ? 'Detected ' + d.class_name + ' (not on table) from bottom corner' : null;
+        },
+      },
+      {
+        id: 'suitConfusion',
+        label: 'Diamond \u2194 Heart suit confusion',
+        triggered: false,
+        test(ctx) {
+          for (const fp of ctx.falsePositives) {
+            for (const miss of ctx.missed) {
+              const fpR = fp.slice(0, -1), fpS = fp.slice(-1);
+              const mR = miss.slice(0, -1), mS = miss.slice(-1);
+              if (fpR === mR && ((fpS === 'd' && mS === 'h') || (fpS === 'h' && mS === 'd')))
+                return 'Actual ' + miss + ' \u2192 detected as ' + fp;
+            }
+          }
+          return null;
+        },
+      },
+      {
+        id: 'rankConfusion',
+        label: 'Rank confusion (wrong rank detected)',
+        triggered: false,
+        test(ctx) {
+          for (const fp of ctx.falsePositives) {
+            for (const miss of ctx.missed) {
+              if (fp.slice(-1) === miss.slice(-1) && fp.slice(0, -1) !== miss.slice(0, -1))
+                return 'Actual ' + miss + ' \u2192 detected as ' + fp;
+            }
+          }
+          return null;
+        },
+      },
+    ],
+
+    // ── Phase 2: old art until missed King or Jack ───────────
+    phase2: {
+      active: false,
+      triggered: false,
+      label: 'Missed King or Jack (old art)',
+      test(ctx) {
+        const m = ctx.missed.find(c => { const r = c.slice(0, -1); return r === 'K' || r === 'J'; });
+        return m ? 'Missed ' + m : null;
+      },
+    },
+
+    // ── Spatial thresholds ───────────────────────────────────
+    // bbox center Y above these values = "bottom of card" detection
+    // (cards have rank index at top-left AND bottom-right inverted)
+    bottomThresholdY: { dealer: 125, player: 425 },
+  };
+
+  if (DEMO.enabled) console.log('[demo] Demo mode active \u2014 4 stop conditions + old art phase');
 
   function resetHandStats() {
     handStats = { scans: 0, detections: 0, correct: 0, wrong: 0 };
@@ -1258,8 +1393,92 @@ $artSwitch.addEventListener('click', () => {
     return { results: results, correct: correct, falsePositives: pool };
   }
 
+  // ── Demo: build analysis context from hand results ────────────
+  function buildDemoContext(finalData) {
+    const actualAll = [
+      ...dealer.map(c => c.rank + c.suitCode),
+      ...player.map(c => c.rank + c.suitCode),
+    ];
+    const detAll = [
+      ...(finalData.dealer_cards || []),
+      ...(finalData.player_cards || []),
+    ];
+    const detections = finalData.detections || [];
+
+    // Bottom-of-card detections (bbox center Y in lower half of card)
+    const bottomDetections = detections.filter(det => {
+      const cy = (det.bbox[1] + det.bbox[3]) / 2;
+      if (det.zone === 'dealer') return cy > DEMO.bottomThresholdY.dealer;
+      if (det.zone === 'player') return cy > DEMO.bottomThresholdY.player;
+      return false;
+    });
+
+    // Compare actual vs detected
+    const comp = compareCards(actualAll, detAll);
+    const missed = comp.results.filter(r => !r.detected).map(r => r.card);
+    return { actualAll, detAll, detections, bottomDetections, missed, falsePositives: comp.falsePositives };
+  }
+
+  function checkDemoStop(finalData) {
+    if (!DEMO.enabled) return null;
+    const ctx = buildDemoContext(finalData);
+
+    // Phase 2: looking for missed K/J with old art
+    if (DEMO.phase2.active && !DEMO.phase2.triggered) {
+      const details = DEMO.phase2.test(ctx);
+      if (details) {
+        DEMO.phase2.triggered = true;
+        console.log('[demo] Phase 2 stop: ' + details);
+        return { reason: DEMO.phase2.label, details, phase: 2 };
+      }
+    }
+
+    // Phase 1: first untriggered matching stop
+    for (const stop of DEMO.stops) {
+      if (!stop.triggered) {
+        const details = stop.test(ctx);
+        if (details) {
+          stop.triggered = true;
+          console.log('[demo] Phase 1 stop (' + stop.id + '): ' + details);
+          return { reason: stop.label, details, phase: 1 };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Log performance to server without showing the summary modal
+  function logPerformanceSilent(finalData) {
+    const actualDealer = dealer.map(c => c.rank + c.suitCode);
+    const actualPlayer = player.map(c => c.rank + c.suitCode);
+    fetch('/api/log_performance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        actual_dealer: actualDealer,
+        actual_player: actualPlayer,
+        detected_dealer: finalData ? (finalData.dealer_cards || []) : [],
+        detected_player: finalData ? (finalData.player_cards || []) : [],
+      }),
+    }).catch(err => console.warn('[perf] log_performance failed:', err));
+  }
+
+  // ── Demo notification bar helpers ─────────────────────────────
+  function showDemoNotify(reason, details) {
+    const el = document.getElementById('demo-notify');
+    let html = '\u25CF ' + reason;
+    if (details) html += '<div class="notify-detail">' + details + '</div>';
+    html += '<div class="notify-hint">Press Space or click Resume to continue</div>';
+    el.innerHTML = html;
+    el.classList.add('visible');
+  }
+  function hideDemoNotify() {
+    const el = document.getElementById('demo-notify');
+    el.classList.remove('visible');
+  }
+
   // ── Hand summary modal ────────────────────────────────────────
-  function showHandSummary(finalData) {
+  function showHandSummary(finalData, demoStop) {
     const actualDealer = dealer.map(c => c.rank + c.suitCode);
     const actualPlayer = player.map(c => c.rank + c.suitCode);
     const detDealer = finalData ? (finalData.dealer_cards || []) : [];
@@ -1319,6 +1538,12 @@ $artSwitch.addEventListener('click', () => {
     else if (resultClass === 'loss') payout = -betAmount;
 
     let html = '<h2>HAND SUMMARY</h2>';
+    if (demoStop) {
+      html += '<div style="background:#e67e22;color:#fff;padding:8px 16px;border-radius:6px;margin-bottom:12px;font-size:14px;font-weight:bold;letter-spacing:1px">';
+      html += '\u25CF DEMO STOP: ' + demoStop.reason;
+      if (demoStop.details) html += '<br><span style="font-weight:normal;font-size:13px">' + demoStop.details + '</span>';
+      html += '</div>';
+    }
     html += '<div class="summary-result ' + resultClass + '">' + resultText + '</div>';
     html += '<div class="summary-totals">Player: ' + pt + ' | Dealer: ' + dt + '</div>';
     html += '<div class="summary-totals" style="opacity:1">';
@@ -1375,22 +1600,75 @@ $artSwitch.addEventListener('click', () => {
             continue;
           }
 
-          // Hand just finished → final detection + summary
+          // Hand just finished → final detection + summary / demo autoplay
           if (handInProgress) {
             handInProgress = false;
             await sleep(500 * BOT_SPEED);
             const finalData = await doDetection();
             tallyDetection(finalData);
-            showHandSummary(finalData);
-            return; // modal pauses bot; CONTINUE resumes
+
+            // Non-demo, or intro hands (skip hand 1): show the hand summary modal
+            if (!DEMO.enabled || (demoHandCount > 1 && demoHandCount <= DEMO.introHands)) {
+              showHandSummary(finalData);
+              return; // modal pauses bot; CONTINUE resumes
+            }
+
+            // ── Demo autoplay: no modal, check conditions ──────
+            logPerformanceSilent(finalData);
+
+            // Bankroll threshold + all Phase 1 stops → activate Phase 2 (old art) and pause
+            if (!DEMO.phase2.active && bankroll >= DEMO.bankrollThreshold && DEMO.stops.every(s => s.triggered)) {
+              DEMO.phase2.active = true;
+              if (!usingOldArt) document.getElementById('art-switch').click();
+              console.log('[demo] Phase 2 — bankroll $' + bankroll + ' >= $' + DEMO.bankrollThreshold + ', switching to old art');
+              showDemoNotify('Bankroll $' + bankroll + ' — switching to old card art', 'Now looking for missed King or Jack');
+              botPaused = true;
+              syncBotUI();
+              return; // paused — resume to continue into Phase 2
+            }
+
+            // Check stop conditions → pause + notification
+            const demoStop = checkDemoStop(finalData);
+            if (demoStop) {
+              showDemoNotify(demoStop.reason, demoStop.details);
+              botPaused = true;
+              syncBotUI();
+              // Phase 2 complete → mark demo as done (speed restores on resume)
+              if (demoStop.phase === 2) {
+                DEMO.enabled = false;
+                console.log('[demo] Demo complete');
+              }
+              return; // paused — cards stay on table for inspection
+            }
+
+            // No stop → clear and continue to next hand
+            clearTable();
+            olCtx.clearRect(0, 0, 820, 520);
+            continue;
           }
 
           // Start new hand
           handInProgress = true;
+          demoHandCount++;
           modelActionCount = 0;
           fallbackActionCount = 0;
           resetHandStats();
           olCtx.clearRect(0, 0, 820, 520);
+
+          // Set speed for this hand: per-hand intro speed, then full demo speed
+          if (DEMO.enabled) {
+            const _iSpeeds = Array.isArray(DEMO.introSpeed) ? DEMO.introSpeed : [DEMO.introSpeed];
+            if (demoHandCount <= DEMO.introHands) {
+              const idx = Math.min(demoHandCount - 1, _iSpeeds.length - 1);
+              BOT_SPEED = _iSpeeds[idx];
+            } else if (demoHandCount === DEMO.introHands + 1) {
+              BOT_SPEED = DEMO.speed;
+              console.log('[demo] Intro done — switching to ' + (1 / DEMO.speed) + 'x speed');
+            }
+            speedIndex = SPEED_STEPS.indexOf(BOT_SPEED);
+            if (speedIndex === -1) speedIndex = 0;
+            updateSpeedDisplay();
+          }
           await fetch('/api/new_hand', { method: 'POST' });
 
           // Auto-set bet based on last Hi-Lo suggestion
@@ -1499,6 +1777,7 @@ $artSwitch.addEventListener('click', () => {
     botPaused = false;
     handInProgress = false;
     clearTimeout(botTimer);
+    hideDemoNotify();
     olCtx.clearRect(0, 0, 820, 520);
     $hudAction.textContent = '\u2014';
     $hudAction.style.color = '#fff';
@@ -1517,6 +1796,16 @@ $artSwitch.addEventListener('click', () => {
       botRunning = true;
       botPaused = false;
       handInProgress = false;
+      // Demo mode: save speed, start at intro speed (1x for first N hands)
+      if (DEMO.enabled) {
+        DEMO.originalSpeed = BOT_SPEED;
+        demoHandCount = 0;
+        const _iSpeeds = Array.isArray(DEMO.introSpeed) ? DEMO.introSpeed : [DEMO.introSpeed];
+        BOT_SPEED = DEMO.introHands > 0 ? _iSpeeds[0] : DEMO.speed;
+        speedIndex = SPEED_STEPS.indexOf(BOT_SPEED);
+        if (speedIndex === -1) speedIndex = 0;
+        updateSpeedDisplay();
+      }
       setYoloStatus('idle', 'IDLE');
       setStrategyStatus('ready', 'READY');
       $hudSource.className = 'hud-status idle';
@@ -1531,6 +1820,17 @@ $artSwitch.addEventListener('click', () => {
     } else {
       // RESUME
       botPaused = false;
+      hideDemoNotify();
+      // Demo ended during pause → restore original speed
+      if (!DEMO.enabled && DEMO.originalSpeed !== null) {
+        BOT_SPEED = DEMO.originalSpeed;
+        DEMO.originalSpeed = null;
+        speedIndex = SPEED_STEPS.indexOf(BOT_SPEED);
+        if (speedIndex === -1) { speedIndex = 3; BOT_SPEED = 1; }
+        updateSpeedDisplay();
+      }
+      clearTable();
+      olCtx.clearRect(0, 0, 820, 520);
       syncBotUI();
       botCycle();
     }
@@ -1548,6 +1848,17 @@ $artSwitch.addEventListener('click', () => {
         clearTimeout(botTimer);
       } else {
         botPaused = false;
+        hideDemoNotify();
+        // Demo ended during pause → restore original speed
+        if (!DEMO.enabled && DEMO.originalSpeed !== null) {
+          BOT_SPEED = DEMO.originalSpeed;
+          DEMO.originalSpeed = null;
+          speedIndex = SPEED_STEPS.indexOf(BOT_SPEED);
+          if (speedIndex === -1) { speedIndex = 3; BOT_SPEED = 1; }
+          updateSpeedDisplay();
+        }
+        clearTable();
+        olCtx.clearRect(0, 0, 820, 520);
         botCycle();
       }
       syncBotUI();
