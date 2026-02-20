@@ -1,148 +1,271 @@
-# Blackjack Card Counting Bot — YOLO + Screen Automation
+# BlackjackYOLO — Real-Time Card Detection & Strategy Bot
 
-A real-time blackjack bot that uses a YOLO object detection model to read cards
-from a browser-based blackjack game, then makes optimal decisions using Basic
-Strategy and Hi-Lo card counting.
+A real-time blackjack assistant that uses YOLO object detection to identify cards
+from a browser-based blackjack game, then recommends optimal plays using Basic
+Strategy and Hi-Lo card counting. The bot runs as a Flask web server with a
+self-hosted HTML5 blackjack UI.
 
-## Architecture Overview
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  Browser Window                      │
-│  ┌───────────────────────────────────────────────┐  │
-│  │         game/blackjack.html                   │  │
-│  │   (self-hosted HTML5 blackjack game)          │  │
-│  └───────────────────────────────────────────────┘  │
-└──────────────────────┬──────────────────────────────┘
-                       │ screen capture (mss)
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│                  bot/main.py                          │
-│  ┌────────────┐  ┌─────────────┐  ┌──────────────┐  │
-│  │ capture.py │→ │ detector.py │→ │ strategy.py  │  │
-│  │ (grab      │  │ (YOLO       │  │ (basic strat │  │
-│  │  screen)   │  │  inference)  │  │  + Hi-Lo)    │  │
-│  └────────────┘  └─────────────┘  └──────┬───────┘  │
-│                                          │           │
-│  ┌────────────┐  ┌─────────────┐         │           │
-│  │ overlay.py │  │ clicker.py  │◄────────┘           │
-│  │ (show YOLO │  │ (pyautogui  │                     │
-│  │  boxes)    │  │  clicks)    │                     │
-│  └────────────┘  └─────────────┘                     │
-└──────────────────────────────────────────────────────┘
+Browser (blackjack.html)
+    │
+    │  base64 screenshot via JS
+    ▼
+Flask API (app.py :5001)
+    │
+    ├─► /api/detect ──► bot/detector.py ──► YOLO (+ optional ResNet18)
+    │                         │
+    │                         ▼
+    │                   bot/strategy.py ──► Basic Strategy + Hi-Lo count
+    │
+    ├─► /api/strategy ──► Direct card-name lookup (no detection needed)
+    ├─► /api/new_hand  ──► Reset per-hand state
+    ├─► /api/reset_count ──► Reset Hi-Lo counter for new shoe
+    └─► /api/log_performance ──► Record detection accuracy to performance/
 ```
-
-### Data Flow (each game step)
-
-1. **Capture** — `mss` grabs a screenshot of the browser region
-2. **Detect** — YOLO model predicts bounding boxes + card classes
-3. **Parse** — Detections are mapped to dealer vs. player hands using spatial regions
-4. **Decide** — Basic Strategy table + Hi-Lo running count → action
-5. **Act** — `pyautogui` clicks the correct button (Hit / Stand / Double / etc.)
-6. **Overlay** — OpenCV window shows the annotated frame (for demo/audience)
 
 ## Project Structure
 
 ```
-blackjack-bot/
-├── README.md                 # You are here
-├── requirements.txt          # pip dependencies
-├── game/
-│   └── blackjack.html        # Self-hosted browser blackjack game
-├── bot/
-│   ├── main.py               # Entry point — game loop
-│   ├── capture.py            # Screen capture utilities
-│   ├── detector.py           # YOLO inference wrapper
-│   ├── strategy.py           # Basic Strategy + Hi-Lo counting
-│   └── clicker.py            # Mouse automation (clicking buttons)
+BlackjackYOLO/
+├── app.py                          # Flask server — main entry point
+├── requirements.txt                # pip dependencies
 ├── config/
-│   └── settings.py           # All configurable coordinates & parameters
-└── utils/
-    ├── calibrate.py          # Interactive tool to find screen coords
-    └── overlay.py            # Draw YOLO detections for demo display
+│   └── settings.py                 # All tunable parameters (model paths,
+│                                   #   thresholds, zones, detection tuning)
+├── bot/
+│   ├── detector.py                 # YOLO inference wrapper + optional
+│   │                               #   two-stage YOLO→ResNet18 pipeline
+│   └── strategy.py                 # Basic Strategy tables + Hi-Lo counting
+├── game/
+│   ├── blackjack.html              # Self-hosted HTML5 blackjack game
+│   ├── cards/                      # Card images (current art)
+│   └── cards_old/                  # Card images (alternate art)
+├── models/
+│   ├── best.pt                     # YOLO detection model (primary)
+│   ├── cnn_resnet18_224x224.pt     # ResNet18 classifier (pipeline mode)
+│   ├── best_old.pt                 # Previous YOLO version
+│   ├── best_46.pt                  # Alternative YOLO checkpoint
+│   └── cnn_resnet18_224x224_old.pt # Previous ResNet18 version
+├── performance/
+│   ├── generate_pr_curve.py        # Precision-Recall curve generator
+│   ├── pr_curve.png                # Generated P-R plot
+│   ├── pr_curve_yolo.png           # YOLO-only P-R plot
+│   └── card_stats_*.json           # Per-card detection accuracy snapshots
+├── blackjack_yolo_training.ipynb   # YOLO model training notebook
+├── YOLO_model_2 (1).ipynb          # Extended YOLO training notebook
+├── pipeline.ipynb                  # Two-stage pipeline training notebook
+└── resnet1.ipynb                   # ResNet18 fine-tuning notebook
 ```
 
 ## Setup
 
-### 1. Python environment
-
-Requires **Python 3.9+**. A virtual environment is recommended:
+Requires **Python 3.9+**.
 
 ```bash
 python -m venv venv
-source venv/bin/activate      # macOS/Linux
-# venv\Scripts\activate       # Windows
-
+source venv/bin/activate        # macOS/Linux
 pip install -r requirements.txt
 ```
 
-### 2. YOLO model weights
+## Running
 
-Place your trained YOLO weights file (e.g. `best.pt`) in the project root or
-update the path in `config/settings.py`:
-
-```python
-MODEL_PATH = "best.pt"   # ← point this to your weights
-```
-
-### 3. Launch the game
-
-Open `game/blackjack.html` in your browser. **Do not resize or move the
-window** during a session. Position it in a consistent spot on your screen.
-
-### 4. Calibrate screen regions
-
-Run the calibration tool once to measure coordinates:
+### Main Application
 
 ```bash
-python -m utils.calibrate
+python app.py
 ```
 
-This will let you:
-- Click corners of the game area → sets `MONITOR_REGION`
-- Click the center of each button (Hit, Stand, Double, Deal) → sets button coords
-- Define dealer-zone and player-zone y-boundaries
+Starts the Flask server on `http://localhost:5001`. Open that URL in your browser
+to load the blackjack game with integrated card detection.
 
-Copy the printed values into `config/settings.py`.
+**Flags:**
 
-### 5. Run the bot
+| Flag | Description |
+|------|-------------|
+| `--pipeline` | Use YOLO + ResNet18 two-stage detection (more accurate) |
+| `--debug` | Save detection frames to `debug_frames/` for inspection |
 
 ```bash
-python -m bot.main
+python app.py --pipeline          # two-stage mode
+python app.py --debug             # save debug frames
+python app.py --pipeline --debug  # both
 ```
 
-Controls:
-- **Space** — trigger one decision step (recommended for demos)
-- **R** — run continuously (auto-play)
-- **Q** — quit
-- **C** — print current Hi-Lo count
+### Precision-Recall Analysis
 
-## Dependencies
+```bash
+python performance/generate_pr_curve.py
+```
 
-| Package       | Purpose                        |
-|---------------|--------------------------------|
-| ultralytics   | YOLO model loading & inference |
-| mss           | Fast screen capture            |
-| pyautogui     | Mouse clicks & movement        |
-| opencv-python | Image display & annotation     |
-| numpy         | Array operations               |
-| keyboard      | Global hotkey listener         |
+Reads `performance/pr_raw.jsonl` (generated during bot runs via the
+`/api/log_performance` endpoint), sweeps confidence thresholds, and outputs a
+P-R curve plot to `performance/pr_curve.png`.
+
+## API Reference
+
+All endpoints accept and return JSON. The server runs on port **5001**.
+
+### `GET /`
+
+Serves the blackjack game UI (`game/blackjack.html`).
+
+---
+
+### `POST /api/detect`
+
+Run YOLO card detection on a screenshot.
+
+**Request:**
+```json
+{
+  "image": "<base64-encoded PNG (data URI prefix optional)>"
+}
+```
+
+**Response:**
+```json
+{
+  "detections": [
+    {
+      "class_name": "Kh",
+      "confidence": 0.93,
+      "bbox": [x1, y1, x2, y2],
+      "zone": "dealer",
+      "pass_num": 1
+    }
+  ],
+  "dealer_cards": ["Kh", "5c"],
+  "player_cards": ["7d", "9s"],
+  "dealer_total": 15,
+  "player_total": 16,
+  "action": "stand",
+  "running_count": 2,
+  "true_count": 2.0,
+  "cards_seen": 8,
+  "total_passes": 2,
+  "suggested_bet_units": 2
+}
+```
+
+**Detection pipeline:**
+1. Crops dealer and player zones into overlapping 416x416 tiles
+2. Runs YOLO on each tile (or YOLO + ResNet18 in `--pipeline` mode)
+3. Remaps tile coordinates to full-frame coordinates
+4. Deduplicates across tiles and multi-corner detections (3-pass dedup)
+5. Iterative masking: masks detected cards and re-runs YOLO to find
+   overlapping cards (up to 3 passes)
+
+---
+
+### `POST /api/strategy`
+
+Look up the optimal action from known card names (no detection needed).
+
+**Request:**
+```json
+{
+  "player_cards": ["Ks", "7h"],
+  "dealer_upcard": "10c",
+  "can_double": true
+}
+```
+
+**Response:**
+```json
+{
+  "action": "stand",
+  "player_total": 17,
+  "dealer_total": 10,
+  "running_count": -1,
+  "true_count": -1.0,
+  "cards_seen": 3,
+  "suggested_bet_units": 1
+}
+```
+
+---
+
+### `POST /api/new_hand`
+
+Clear per-hand card tracking (keeps the running count).
+
+**Response:** `{ "status": "ok" }`
+
+---
+
+### `POST /api/reset_count`
+
+Reset the Hi-Lo counter for a new shoe.
+
+**Response:** `{ "status": "ok", "running_count": 0, "true_count": 0.0 }`
+
+---
+
+### `POST /api/log_performance`
+
+Record actual vs. detected cards for accuracy tracking.
+
+**Request:**
+```json
+{
+  "actual_dealer": ["Kh", "5c"],
+  "actual_player": ["7d", "9s", "3h"],
+  "detected_dealer": ["Kh"],
+  "detected_player": ["7d", "9s"]
+}
+```
+
+**Response:** `{ "status": "ok", "cumulative_rate": 85.7 }`
+
+Appends raw detection data to `performance/pr_raw.jsonl` and updates
+cumulative per-card stats in `performance/card_stats.json`.
+
+## Detection Modes
+
+| Mode | Command | How it works |
+|------|---------|-------------|
+| **Single-stage** | `python app.py` | YOLO only — faster |
+| **Two-stage pipeline** | `python app.py --pipeline` | YOLO for bounding boxes, then ResNet18 classifies each crop (97.8% test accuracy) |
+
+Both modes use zone-based tiling (dealer zone y:20-200, player zone y:320-500)
+with iterative masking to detect overlapping cards.
+
+## Configuration
+
+All tunable parameters live in `config/settings.py`:
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `MODEL_PATH` | `models/best.pt` | YOLO weights path |
+| `CONFIDENCE_THRESHOLD` | 0.16 | Minimum confidence for game decisions |
+| `CONFIDENCE_FLOOR` | 0.05 | Lowest confidence kept for P-R logging |
+| `IOU_THRESHOLD` | 0.40 | NMS IoU threshold |
+| `DEALER_ZONE_Y` | (20, 200) | Dealer card region (pixel y-range) |
+| `PLAYER_ZONE_Y` | (320, 500) | Player card region (pixel y-range) |
+| `MAX_DETECTION_PASSES` | 3 | Iterative masking passes |
+| `PIPELINE_MODE` | False | Default two-stage toggle |
+| `CNN_MODEL_PATH` | `models/cnn_resnet18_224x224.pt` | ResNet18 weights |
+| `YOLO_IMGSZ` | 640 | YOLO inference resolution |
+| `ZONE_TILE_SIZE` | 416 | Square tile side for zone detection |
 
 ## YOLO Class Mapping
 
-The detector expects your YOLO model to output class names like:
-`2c`, `2d`, `2h`, `2s`, `3c`, ..., `As`, `Ah`, `Ad`, `Ac`
+The detector expects 52 class names in the format `<rank><suit>`:
+- Ranks: `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `J`, `Q`, `K`, `A`
+- Suits: `c` (clubs), `d` (diamonds), `h` (hearts), `s` (spades)
+- Examples: `2c`, `10h`, `Ks`, `Ad`
 
-Where the first character(s) are the rank (2-10, J, Q, K, A) and the last
-character is the suit (c=clubs, d=diamonds, h=hearts, s=spades).
+## Dependencies
 
-Update the `CLASS_NAMES` list in `config/settings.py` if your model uses a
-different naming convention.
-
-## Tips for the Class Demo
-
-1. Run in **step mode** (Space to advance) so the audience can see each detection.
-2. The overlay window shows live bounding boxes — point your projector at that.
-3. Ask classmates to guess the action before you press Space.
-4. Show a mix of successes and failures — the failures are more interesting!
-5. Keep the browser and overlay windows side-by-side on screen.
+| Package | Purpose |
+|---------|---------|
+| ultralytics | YOLO model loading and inference |
+| opencv-python | Image processing (BGR conversion, frame annotation) |
+| numpy | Array operations |
+| flask | Web server and API |
+| Pillow | Image decoding (base64 to PIL) |
+| torch | Deep learning runtime (ResNet18 pipeline, YOLO backend) |
+| torchvision | ResNet18 model architecture and transforms |
+| matplotlib | *(optional)* Plotting for P-R curve generation |
